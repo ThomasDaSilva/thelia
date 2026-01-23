@@ -43,14 +43,14 @@ class ConfigStoreController extends BaseAdminController
         return $this->renderTemplate();
     }
 
-    protected function getAndWriteStoreMediaFileInConfig($form, $inputName, $configKey, $storeMediaUploadDir): void
+    protected function getAndWriteStoreMediaFileInConfig($form, $inputName, $configKey, $storeMediaUploadDir, $locale): void
     {
         $file = $form->get($inputName)->getData();
 
         if ($file != null) {
             // Delete the old file
             $fs = new \Symfony\Component\Filesystem\Filesystem();
-            $oldFileName = ConfigQuery::read($configKey);
+            $oldFileName = ConfigQuery::read($configKey, null, false, $locale);
 
             if ($oldFileName !== null) {
                 $oldFilePath = $storeMediaUploadDir.DS.$oldFileName;
@@ -62,7 +62,7 @@ class ConfigStoreController extends BaseAdminController
             // Write the new file
             $newFileName = uniqid().'-'.$file->getClientOriginalName();
             $file->move($storeMediaUploadDir, $newFileName);
-            ConfigQuery::write($configKey, $newFileName, false);
+            ConfigQuery::write($configKey, $newFileName, false, $locale);
         }
     }
 
@@ -75,11 +75,12 @@ class ConfigStoreController extends BaseAdminController
         $error_msg = $ex = false;
         $response = null;
         $configStoreForm = $this->createForm(AdminForm::CONFIG_STORE);
+        $locale = $this->getCurrentEditionLocale();
 
         try {
             $form = $this->validateForm($configStoreForm);
 
-            $storeMediaUploadDir = ConfigQuery::read('images_library_path');
+            $storeMediaUploadDir = ConfigQuery::read('images_library_path', null, false, $locale);
 
             if ($storeMediaUploadDir === null) {
                 $storeMediaUploadDir = THELIA_LOCAL_DIR.'media'.DS.'images';
@@ -98,7 +99,7 @@ class ConfigStoreController extends BaseAdminController
             ];
 
             foreach ($storeMediaList as $input_name => $config_key) {
-                $this->getAndWriteStoreMediaFileInConfig($form, $input_name, $config_key, $storeMediaUploadDir);
+                $this->getAndWriteStoreMediaFileInConfig($form, $input_name, $config_key, $storeMediaUploadDir, $locale);
             }
 
             $data = $form->getData();
@@ -106,7 +107,7 @@ class ConfigStoreController extends BaseAdminController
             // Update store
             foreach ($data as $name => $value) {
                 if (!\array_key_exists($name, $storeMediaList) && !$configStoreForm->isTemplateDefinedHiddenFieldName($name)) {
-                    ConfigQuery::write($name, $value, false);
+                    ConfigQuery::write($name, $value, false, $locale);
                 }
             }
 

@@ -117,18 +117,30 @@ class ConfigQuery extends BaseConfigQuery
         return self::read('unknown-flag-path', '/assets/img/flags/unknown.png');
     }
 
-    public static function getStoreEmail()
+    public static function getStoreEmail(?string $locale = null)
     {
+        if ($locale) {
+            return self::read('store_email'.$locale, '');
+        }
+
         return self::read('store_email', null);
     }
 
-    public static function getStoreName()
+    public static function getStoreName(?string $locale = null)
     {
+        if ($locale) {
+            return self::read('store_name_'.$locale, '');
+        }
+
         return self::read('store_name', '');
     }
 
-    public static function getStoreDescription()
+    public static function getStoreDescription(?string $locale = null)
     {
+        if ($locale) {
+            return self::read('store_description'.$locale, '');
+        }
+
         return self::read('store_description', '');
     }
 

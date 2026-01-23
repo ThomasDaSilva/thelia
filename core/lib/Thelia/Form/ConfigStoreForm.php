@@ -19,6 +19,7 @@ use Symfony\Component\Validator\Constraints;
 use Symfony\Component\Validator\Context\ExecutionContextInterface;
 use Thelia\Core\Translation\Translator;
 use Thelia\Model\ConfigQuery;
+use Thelia\Model\LangQuery;
 
 class ConfigStoreForm extends BaseForm
 {
@@ -26,12 +27,20 @@ class ConfigStoreForm extends BaseForm
     {
         $tr = Translator::getInstance();
 
+        $lang = LangQuery::create()->findOneByByDefault(1);
+
+        if ($editLanguageId = $this->getRequest()->query->get('edit_language_id')) {
+            $lang = LangQuery::create()->findOneById($editLanguageId);
+        }
+
+        $locale = $lang->getLocale();
+
         $this->formBuilder
             ->add(
                 'store_name',
                 TextType::class,
                 [
-                    'data' => ConfigQuery::getStoreName(),
+                    'data' => ConfigQuery::getStoreName($locale),
                     'constraints' => [new Constraints\NotBlank()],
                     'label' => $tr->trans('Store name'),
                     'attr' => [
@@ -43,7 +52,7 @@ class ConfigStoreForm extends BaseForm
                 'store_description',
                 TextType::class,
                 [
-                    'data' => ConfigQuery::getStoreDescription(),
+                    'data' => ConfigQuery::getStoreDescription($locale),
                     'required' => false,
                     'label' => $tr->trans('Store description'),
                     'attr' => [
@@ -55,7 +64,7 @@ class ConfigStoreForm extends BaseForm
                 'store_email',
                 TextType::class,
                 [
-                    'data' => ConfigQuery::getStoreEmail(),
+                    'data' => ConfigQuery::getStoreEmail($locale),
                     'constraints' => [
                         new Constraints\NotBlank(),
                         new Constraints\Email(),
@@ -73,7 +82,7 @@ class ConfigStoreForm extends BaseForm
                 'store_notification_emails',
                 TextType::class,
                 [
-                    'data' => ConfigQuery::read('store_notification_emails'),
+                    'data' => ConfigQuery::read('store_notification_emails', null, false, $locale),
                     'constraints' => [
                         new Constraints\NotBlank(),
                         new Constraints\Callback(
@@ -93,7 +102,7 @@ class ConfigStoreForm extends BaseForm
                 'store_business_id',
                 TextType::class,
                 [
-                    'data' => ConfigQuery::read('store_business_id'),
+                    'data' => ConfigQuery::read('store_business_id', null, false, $locale),
                     'label' => $tr->trans('Business ID'),
                     'required' => false,
                     'attr' => [
@@ -105,7 +114,7 @@ class ConfigStoreForm extends BaseForm
                 'store_phone',
                 TextType::class,
                 [
-                    'data' => ConfigQuery::read('store_phone'),
+                    'data' => ConfigQuery::read('store_phone', null, false, $locale),
                     'label' => $tr->trans('Phone'),
                     'required' => false,
                     'attr' => [
@@ -117,7 +126,7 @@ class ConfigStoreForm extends BaseForm
                 'store_fax',
                 TextType::class,
                 [
-                    'data' => ConfigQuery::read('store_fax'),
+                    'data' => ConfigQuery::read('store_fax', null, false, $locale),
                     'label' => $tr->trans('Fax'),
                     'required' => false,
                     'attr' => [
@@ -129,7 +138,7 @@ class ConfigStoreForm extends BaseForm
                 'store_address1',
                 TextType::class,
                 [
-                    'data' => ConfigQuery::read('store_address1'),
+                    'data' => ConfigQuery::read('store_address1', null, false, $locale),
                     'constraints' => [
                         new Constraints\NotBlank(),
                     ],
@@ -143,7 +152,7 @@ class ConfigStoreForm extends BaseForm
                 'store_address2',
                 TextType::class,
                 [
-                    'data' => ConfigQuery::read('store_address2'),
+                    'data' => ConfigQuery::read('store_address2', null, false, $locale),
                     'required' => false,
                     'attr' => [
                         'placeholder' => $tr->trans('Additional address information'),
@@ -154,7 +163,7 @@ class ConfigStoreForm extends BaseForm
                 'store_address3',
                 TextType::class,
                 [
-                    'data' => ConfigQuery::read('store_address3'),
+                    'data' => ConfigQuery::read('store_address3', null, false, $locale),
                     'required' => false,
                     'attr' => [
                         'placeholder' => $tr->trans('Additional address information'),
@@ -165,7 +174,7 @@ class ConfigStoreForm extends BaseForm
                 'store_zipcode',
                 TextType::class,
                 [
-                    'data' => ConfigQuery::read('store_zipcode'),
+                    'data' => ConfigQuery::read('store_zipcode', null, false, $locale),
                     'constraints' => [
                         new Constraints\NotBlank(),
                     ],
@@ -179,7 +188,7 @@ class ConfigStoreForm extends BaseForm
                 'store_city',
                 TextType::class,
                 [
-                    'data' => ConfigQuery::read('store_city'),
+                    'data' => ConfigQuery::read('store_city', null, false, $locale),
                     'constraints' => [
                         new Constraints\NotBlank(),
                     ],
@@ -193,7 +202,7 @@ class ConfigStoreForm extends BaseForm
                 'store_country',
                 IntegerType::class,
                 [
-                    'data' => ConfigQuery::read('store_country'),
+                    'data' => ConfigQuery::read('store_country', null, false, $locale),
                     'constraints' => [
                         new Constraints\NotBlank(),
                     ],

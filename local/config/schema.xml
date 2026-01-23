@@ -388,7 +388,7 @@
     </unique>
     <behavior name="timestampable" />
     <behavior name="i18n">
-      <parameter name="i18n_columns" value="title, description, chapo, postscriptum" />
+      <parameter name="i18n_columns" value="value, title, description, chapo, postscriptum" />
     </behavior>
   </table>
   <table name="customer" namespace="Thelia\Model">

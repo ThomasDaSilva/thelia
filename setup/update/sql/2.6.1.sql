@@ -7,6 +7,26 @@ UPDATE `config` SET `value`='1' WHERE `name`='thelia_release_version';
 UPDATE `config` SET `value`='' WHERE `name`='thelia_extra_version';
 
 # ======================================================================================================================
+# Add value IN config_i18n
+# ======================================================================================================================
+
+ALTER TABLE config_i18n ADD COLUMN `value` TEXT NOT NULL AFTER `locale`;
+
+UPDATE config_i18n AS dest
+INNER JOIN config AS src ON dest.id = src.id
+SET dest.value = src.value;
+
+INSERT INTO `config_i18n` (`id`, `locale`, `value`)
+SELECT c.`id`, l.`locale`, c.`value`
+FROM `config` c
+JOIN `lang` l
+LEFT JOIN `config_i18n` ci
+ON ci.`id` = c.`id` AND ci.`locale` = l.`locale`
+WHERE ci.`id` IS NULL;
+
+ALTER TABLE config DROP COLUMN `value`;
+
+# ======================================================================================================================
 # Add file IN product_image_i18n
 # ======================================================================================================================
 

@@ -455,7 +455,6 @@ CREATE TABLE `config`
 (
     `id` INTEGER NOT NULL AUTO_INCREMENT,
     `name` VARCHAR(255) NOT NULL,
-    `value` TEXT NOT NULL,
     `secured` TINYINT DEFAULT 1 NOT NULL,
     `hidden` TINYINT DEFAULT 1 NOT NULL,
     `created_at` DATETIME,
@@ -2577,6 +2576,7 @@ CREATE TABLE `config_i18n`
 (
     `id` INTEGER NOT NULL,
     `locale` VARCHAR(5) DEFAULT 'en_US' NOT NULL,
+    `value` TEXT NOT NULL,
     `title` VARCHAR(255),
     `description` LONGTEXT,
     `chapo` TEXT,

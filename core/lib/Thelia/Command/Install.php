@@ -138,7 +138,7 @@ class Install extends ContainerAwareCommand
     protected function manageSecret(Database $database): void
     {
         $secret = TokenProvider::generateToken();
-        $sql = "UPDATE `config` SET `value`=? WHERE `name`='form.secret'";
+        $sql = "UPDATE `config` JOIN `config_i18n` ON `config`.`id` = `config_i18n`.`id` SET `value`=? WHERE `name`='form.secret'";
         $database->execute($sql, [$secret]);
     }
 
