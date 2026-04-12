@@ -56,6 +56,7 @@ $options = getopt('', [
     'pdf_theme:',
     'email_theme:',
     'with-demo',
+    'skip-demo-images',
     'with-admin',
     'admin_login:',
     'admin_password:',
@@ -230,7 +231,7 @@ foreach ($themes as $type => $name) {
 if (isset($options['with-demo'])) {
     $commands[] = [
         'label' => 'Importing demo data',
-        'input' => ['command' => 'thelia:demo:import', '--skip-images' => true],
+        'input' => ['command' => 'thelia:demo:import', '--skip-images' => isset($options['skip-demo-images'])],
     ];
 }
 
@@ -253,6 +254,17 @@ echo "Running kernel commands...\n";
 $kernelClass = class_exists(App\Kernel::class) ? App\Kernel::class : Thelia\Core\TheliaKernel::class;
 $output = new Symfony\Component\Console\Output\ConsoleOutput();
 
+// template:set triggers cache:clear which deletes container files mid-process.
+// This causes harmless PHP warnings ("Failed to open stream") when the
+// console.terminate event tries to load deleted services. We suppress them.
+set_error_handler(static function (int $errno, string $errstr) {
+    if (str_contains($errstr, 'Failed to open stream') || str_contains($errstr, 'Failed opening required')) {
+        return true;
+    }
+
+    return false;
+}, \E_WARNING);
+
 foreach ($commands as $cmd) {
     echo "  {$cmd['label']}\n";
 
@@ -262,9 +274,6 @@ foreach ($commands as $cmd) {
     $app = new Symfony\Bundle\FrameworkBundle\Console\Application($kernel);
     $app->setAutoExit(false);
 
-    // template:set dispatches a cache:clear that deletes container files.
-    // The console.terminate event then fails loading a deleted service.
-    // We suppress this: the command itself has already completed.
     try {
         $exitCode = $app->run(new Symfony\Component\Console\Input\ArrayInput($cmd['input']), $output);
     } catch (\Error $e) {
@@ -286,6 +295,8 @@ foreach ($commands as $cmd) {
     } catch (\Throwable) {
     }
 }
+
+restore_error_handler();
 
 // ── Result ───────────────────────────────────────────────────────────
 
