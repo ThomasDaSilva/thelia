@@ -375,8 +375,8 @@ final class ProductSaleElementActionTest extends ActionIntegrationTestCase
             ->setSalePrice(20.0)
             ->setWeight(0.5)
             ->setQuantity(100)
-            ->setOnsale(0)
-            ->setIsnew(0)
+            ->setOnsale(false)
+            ->setIsnew(false)
             ->setEanCode('');
 
         $this->dispatch($event, TheliaEvents::PRODUCT_COMBINATION_GENERATION);

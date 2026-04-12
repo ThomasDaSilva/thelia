@@ -28,6 +28,23 @@ if (method_exists(Dotenv::class, 'bootEnv')) {
     (new Dotenv())->bootEnv(dirname(__DIR__).'/.env');
 }
 
+// In test mode, Symfony Dotenv skips .env.local by design (test isolation).
+// However, the database connection is typically the same in dev and test.
+// Bridge DATABASE_* vars from .env.local when they are not already defined
+// (by CI env, phpunit.xml, .env.test, or .env.test.local).
+if (empty($_SERVER['DATABASE_HOST'])) {
+    $envLocalFile = dirname(__DIR__).'/.env.local';
+    if (file_exists($envLocalFile)) {
+        $localVars = (new Dotenv())->parse(file_get_contents($envLocalFile));
+        $dbKeys = ['DATABASE_HOST', 'DATABASE_PORT', 'DATABASE_NAME', 'DATABASE_USER', 'DATABASE_PASSWORD'];
+        foreach ($dbKeys as $key) {
+            if (isset($localVars[$key]) && empty($_SERVER[$key])) {
+                $_SERVER[$key] = $_ENV[$key] = $localVars[$key];
+            }
+        }
+    }
+}
+
 if ($_SERVER['APP_DEBUG']) {
     umask(0o000);
 }
