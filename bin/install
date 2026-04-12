@@ -228,6 +228,15 @@ foreach ($themes as $type => $name) {
     }
 }
 
+// Run postActivation() for all modules — DatabaseSetup inserts modules
+// with activate=1 but never calls postActivation(), which means modules
+// that seed data in postActivation() (e.g. TheliaBlocks shortcodes)
+// would be missing their initial data.
+$commands[] = [
+    'label' => 'Running module post-activation hooks',
+    'input' => ['command' => 'module:post-activate-all'],
+];
+
 if (isset($options['with-demo'])) {
     $commands[] = [
         'label' => 'Importing demo data',
