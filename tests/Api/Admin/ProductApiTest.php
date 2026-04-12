@@ -98,6 +98,12 @@ final class ProductApiTest extends ApiTestCase
         $response = $this->jsonRequest('PATCH', '/api/admin/products/'.$product->getId(), [
             'ref' => 'PATCHED-REF',
             'visible' => false,
+            'i18ns' => [
+                'en_US' => [
+                    'title' => 'Patched Title',
+                    'locale' => 'en_US',
+                ],
+            ],
         ], $token, 'merge-patch+json');
 
         self::assertJsonResponseSuccessful($response);
