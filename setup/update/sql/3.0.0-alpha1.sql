@@ -246,15 +246,4 @@ UPDATE `config` SET `value`='' WHERE `name`='thelia_extra_version';
 -- WebProfiler is not bundled in thelia-project on T3; disable it if it survived from T2.
 UPDATE `module` SET `activate` = 0 WHERE `code` = 'WebProfiler';
 
--- Register T3 native modules (no-op if already present from a fresh T3 install).
-INSERT INTO `module` (`code`, `version`, `type`, `category`, `activate`, `position`, `full_namespace`, `mandatory`, `hidden`, `created_at`, `updated_at`) VALUES
-    ('TwigEngine',       '1.0.0', 1, 'classic', 1, 100, 'TwigEngine\\TwigEngine',             0, 0, NOW(), NOW()),
-    ('HeaderHighlights', '1.1.9', 1, 'classic', 0, 101, 'HeaderHighlights\\HeaderHighlights', 0, 0, NOW(), NOW()),
-    ('RecentlyViewed',   '2.1.0', 1, 'classic', 0, 102, 'RecentlyViewed\\RecentlyViewed',     0, 0, NOW(), NOW()),
-    ('SEOne',            '1.0.0', 1, 'classic', 0, 103, 'SEOne\\SEOne',                       0, 0, NOW(), NOW())
-ON DUPLICATE KEY UPDATE `code` = `code`;
-
--- Flexy has hard dependencies on TwigEngine and TheliaBlocks; ensure they are active.
-UPDATE `module` SET `activate` = 1 WHERE `code` IN ('TwigEngine', 'TheliaBlocks');
-
 SET FOREIGN_KEY_CHECKS = 1;
