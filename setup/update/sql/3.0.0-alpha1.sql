@@ -246,4 +246,13 @@ UPDATE `config` SET `value`='' WHERE `name`='thelia_extra_version';
 -- WebProfiler is not bundled in thelia-project on T3; disable it if it survived from T2.
 UPDATE `module` SET `activate` = 0 WHERE `code` = 'WebProfiler';
 
+-- Flexy is registered in config/bundles.php by its Symfony recipe and its controllers
+-- are scanned at container build regardless of the active template. TwigEngine and
+-- TheliaBlocks must therefore exist and be active for the kernel to boot; any further
+-- template-specific modules are installed by `template:set` from the template composer.json.
+INSERT INTO `module` (`code`, `version`, `type`, `category`, `activate`, `position`, `full_namespace`, `mandatory`, `hidden`, `created_at`, `updated_at`) VALUES
+    ('TwigEngine', '1.0.0', 1, 'classic', 1, 100, 'TwigEngine\\TwigEngine', 0, 0, NOW(), NOW())
+ON DUPLICATE KEY UPDATE `activate` = 1;
+UPDATE `module` SET `activate` = 1 WHERE `code` = 'TheliaBlocks';
+
 SET FOREIGN_KEY_CHECKS = 1;
