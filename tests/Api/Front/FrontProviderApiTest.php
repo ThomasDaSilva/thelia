@@ -62,7 +62,7 @@ final class FrontProviderApiTest extends ApiTestCase
 
         $statusCode = $response->getStatusCode();
         // The provider may return an array or throw if resource is unknown.
-        self::assertContains($statusCode, [200, 404, 500], sprintf(
+        self::assertContains($statusCode, [200, 404, 500], \sprintf(
             'Expected 200, 404 or 500 for tfilters/products, got %d: %s',
             $statusCode,
             substr($response->getContent(), 0, 500),
@@ -90,7 +90,7 @@ final class FrontProviderApiTest extends ApiTestCase
         $statusCode = $response->getStatusCode();
         // Without delivery modules that handle pickup, this may return
         // an empty collection or a 200 with no locations.
-        self::assertContains($statusCode, [200, 404, 500], sprintf(
+        self::assertContains($statusCode, [200, 404, 500], \sprintf(
             'Expected 200 or 404 for pickup locations, got %d: %s',
             $statusCode,
             substr($response->getContent(), 0, 500),
