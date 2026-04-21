@@ -222,6 +222,10 @@ ALTER TABLE `cart`
     ADD INDEX idx_cart_address_delivery_id (address_delivery_id),
     ADD INDEX idx_cart_address_invoice_id (address_invoice_id);
 
+-- Legacy values reference address.id; the new FK targets cart_address.id.
+-- Reset them so users re-select their delivery/invoice address at checkout.
+UPDATE `cart` SET `address_delivery_id` = NULL, `address_invoice_id` = NULL;
+
 ALTER TABLE `cart`
     ADD CONSTRAINT fk_cart_address_delivery_id
     FOREIGN KEY (address_delivery_id)
