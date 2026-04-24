@@ -96,7 +96,7 @@ class FeatureProduct implements PropelResourceInterface
         Product::GROUP_ADMIN_READ_SINGLE,
         Product::GROUP_FRONT_READ_SINGLE,
     ])]
-    public ?string $freeTextValue = "";
+    public ?string $freeTextValue = '';
 
     #[Groups([
         self::GROUP_ADMIN_READ,
@@ -170,9 +170,10 @@ class FeatureProduct implements PropelResourceInterface
         return $this->freeTextValue;
     }
 
-    public function setFreeTextValue(?string $freeTextValue): FeatureProduct
+    public function setFreeTextValue(?string $freeTextValue): self
     {
         $this->freeTextValue = $freeTextValue;
+
         return $this;
     }
 
@@ -181,9 +182,10 @@ class FeatureProduct implements PropelResourceInterface
         return $this->isFreeText;
     }
 
-    public function setIsFreeText(?bool $isFreeText): FeatureProduct
+    public function setIsFreeText(?bool $isFreeText): self
     {
         $this->isFreeText = $isFreeText;
+
         return $this;
     }
 
