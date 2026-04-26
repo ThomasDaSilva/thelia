@@ -60,8 +60,9 @@ export async function setNonDefaultAsDefault(page: Page): Promise<void> {
   const favoriteButton = page.locator('.AddressCard .Favorite[data-modal="confirmDefaultAdress"]').first();
   await favoriteButton.click();
   const confirm = page.locator('[data-modal-target="confirm"][href*="/account/address/default/"]').first();
+  await expect(confirm).toBeVisible({ timeout: 5_000 });
   await Promise.all([
-    page.waitForURL(/\/account\/addresses/),
+    page.waitForURL(/\/account\/addresses/, { timeout: 10_000 }),
     confirm.click(),
   ]);
 }
