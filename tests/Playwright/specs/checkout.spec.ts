@@ -9,8 +9,13 @@ import {
   selectPaymentByLabel,
 } from '../helpers/checkout';
 import { ddevMysql } from '../helpers/db';
+import { ensureCustomDeliveryConfigured } from '../helpers/delivery';
 
 test.describe('Checkout', () => {
+  test.beforeAll(async () => {
+    await ensureCustomDeliveryConfigured();
+  });
+
   test('full happy path: cart → delivery → payment → confirm with Cheque', async ({ authedPage, freshCustomer }) => {
     await gotoProduct(authedPage, 'horatio');
     await addCurrentProductToCart(authedPage);
