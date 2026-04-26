@@ -34,7 +34,6 @@
         "thelia/flexy": "dev-twig",
         "ext-simplexml": "*",
         "ext-dom": "*",
-        "thelia/customer-family-module": "dev-twig",
         "thelia/open-api-module": "dev-twig"
     },
     "require-dev": {
