@@ -70,4 +70,15 @@ final class AccessControlRulesTest extends IntegrationTestCase
         self::assertNotNull($roles);
         self::assertContains('PUBLIC_ACCESS', $roles);
     }
+
+    public function testTokenRefreshEndpointsArePublic(): void
+    {
+        [$adminRefreshRoles] = $this->accessMap->getPatterns(Request::create('/api/admin/token/refresh'));
+        [$frontRefreshRoles] = $this->accessMap->getPatterns(Request::create('/api/front/token/refresh'));
+
+        self::assertNotNull($adminRefreshRoles);
+        self::assertContains('PUBLIC_ACCESS', $adminRefreshRoles);
+        self::assertNotNull($frontRefreshRoles);
+        self::assertContains('PUBLIC_ACCESS', $frontRefreshRoles);
+    }
 }
