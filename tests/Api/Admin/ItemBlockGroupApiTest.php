@@ -22,7 +22,7 @@ use TheliaBlocks\Model\ItemBlockGroupQuery;
  * Covers the AP 4.3 admin endpoints exposed by the TheliaBlocks module for
  * the polymorphic item_block_group association:
  *   POST   /api/admin/item_block_groups (upsert by itemType+itemId)
- *   DELETE /api/admin/item_block_groups/{id}
+ *   DELETE /api/admin/item_block_groups/{id}.
  */
 final class ItemBlockGroupApiTest extends ApiTestCase
 {
