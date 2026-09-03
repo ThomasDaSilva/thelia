@@ -16,7 +16,10 @@ namespace Thelia\Tests\Integration\Mailer;
 
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\Mailer\MailerInterface;
+use Thelia\Core\HttpFoundation\Request;
+use Thelia\Core\Template\Exception\ResourceNotFoundException;
 use Thelia\Core\Template\Parser\ParserResolver;
+use Thelia\Core\Template\ParserInterface;
 use Thelia\Core\Template\TemplateHelperInterface;
 use Thelia\Mailer\MailerFactory;
 use Thelia\Model\LangQuery;
@@ -116,6 +119,156 @@ final class MailerFactoryTest extends IntegrationTestCase
         self::assertSame('fr_FR', $session->getLang()->getLocale());
     }
 
+    public function testCreateEmailMessageRestoresTheParserTemplateWhenRenderingFails(): void
+    {
+        $templateHelper = $this->getService(TemplateHelperInterface::class);
+        $frontTemplate = $templateHelper->getActiveFrontTemplate();
+
+        // Parsers are shared services: the template definition MailerFactory leaves behind is
+        // the one every later render sees, hence resolving the very same instance here.
+        $parser = $this->getService(ParserResolver::class)->getParser(
+            $templateHelper->getActiveMailTemplate()->getAbsolutePath(),
+            'order_confirmation',
+        );
+
+        $initialTemplate = $parser->getTemplateDefinition();
+        $parser->setTemplateDefinition($frontTemplate);
+
+        // An existing template file so a parser is resolved, and a subject that cannot be
+        // compiled so rendering throws once the mail template has been pushed.
+        $message = new Message();
+        $message->setName('test_unrenderable_subject_message');
+        $message->setLocale('en_US');
+        $message->setSubject('{{ ');
+        $message->setHtmlTemplateFileName('order_confirmation.html');
+        $message->save();
+
+        try {
+            $this->mailerFactory->createEmailMessage(
+                'test_unrenderable_subject_message',
+                ['sender@example.com' => 'Sender'],
+                ['recipient@example.com' => 'Recipient'],
+                [],
+                'en_US',
+            );
+            self::fail('Rendering was expected to fail.');
+        } catch (\Exception) {
+            // The failure is the point: sendEmailMessage() swallows it in production.
+        }
+
+        $templateAfterFailure = $parser->getTemplateDefinition();
+
+        if (null !== $initialTemplate) {
+            $parser->setTemplateDefinition($initialTemplate);
+        }
+
+        self::assertSame($frontTemplate->getAbsolutePath(), $templateAfterFailure?->getAbsolutePath());
+    }
+
+    public function testCreateEmailMessageRendersInTheRequestedLocaleInAdminEnvironment(): void
+    {
+        $session = $this->getService(RequestStack::class)->getMainRequest()->getSession();
+
+        $french = LangQuery::create()->findOneByLocale('fr_FR');
+        $english = LangQuery::create()->findOneByLocale('en_US');
+        self::assertNotNull($french);
+        self::assertNotNull($english);
+
+        // The administrator browses the back office in English, the customer is French.
+        $session->setAdminLang($english);
+        $session->setLang($french);
+
+        $message = new Message();
+        $message->setName('test_admin_triggered_customer_message');
+        $message->setLocale('fr_FR');
+        $message->setSubject('Sujet');
+        $message->setHtmlMessage('<p>Corps</p>');
+        $message->setTextMessage('Corps');
+        $message->save();
+
+        $renderedLocales = [];
+        $parser = $this->createMock(ParserInterface::class);
+        $parser->method('getRequest')->willReturn($this->getService(RequestStack::class)->getMainRequest());
+        $parser->method('getTemplateHelper')->willReturn($this->getService(TemplateHelperInterface::class));
+        $parser->method('renderString')->willReturnCallback(
+            static function (string $templateText) use (&$renderedLocales, $session): string {
+                // What the parsers and the translator actually read to localize a render.
+                $renderedLocales[] = $session->getLang()->getLocale();
+
+                return $templateText;
+            },
+        );
+
+        $mailerFactory = new MailerFactory(
+            $this->getService(TemplateHelperInterface::class),
+            $this->createParserResolverReturning($parser),
+            $this->getService(MailerInterface::class),
+        );
+
+        $wasAdminEnvironment = Request::$isAdminEnv;
+        Request::$isAdminEnv = true;
+
+        try {
+            // Guard: in an admin environment Session::getLang() reads the admin language, so
+            // the assertions below cannot be satisfied by the front office language slot.
+            self::assertSame('en_US', $session->getLang()->getLocale());
+
+            $mailerFactory->createEmailMessage(
+                'test_admin_triggered_customer_message',
+                ['sender@example.com' => 'Sender'],
+                ['customer@example.com' => 'Customer'],
+                [],
+                'fr_FR',
+            );
+
+            self::assertSame('en_US', $session->getAdminLang()->getLocale());
+        } finally {
+            Request::$isAdminEnv = $wasAdminEnvironment;
+        }
+
+        self::assertNotSame([], $renderedLocales);
+        self::assertSame(['fr_FR'], array_values(array_unique($renderedLocales)));
+        // The front office language of the session is left untouched by an admin-side send.
+        self::assertSame('fr_FR', $session->getLang()->getLocale());
+    }
+
+    public function testAMessageWithoutATemplateFileRendersItsStoredBody(): void
+    {
+        // No template file at all: the message renders from its database-stored body, so
+        // there is no file for a parser to claim. Resolving a parser from the message code
+        // reports a missing resource, and sendEmailMessage() would swallow it: the mail is
+        // silently lost. The default parser has to render the stored body instead.
+        $message = new Message();
+        $message->setName('test_body_only_message');
+        $message->setLocale('en_US');
+        $message->setSubject('Subject');
+        $message->setHtmlMessage('<p>Stored body</p>');
+        $message->setTextMessage('Stored body');
+        $message->save();
+
+        $parser = $this->createMock(ParserInterface::class);
+        $parser->method('getRequest')->willReturn($this->getService(RequestStack::class)->getMainRequest());
+        $parser->method('getTemplateHelper')->willReturn($this->getService(TemplateHelperInterface::class));
+        $parser->method('renderString')->willReturnArgument(0);
+
+        $mailerFactory = new MailerFactory(
+            $this->getService(TemplateHelperInterface::class),
+            $this->createParserResolverWhereNoParserClaimsAView($parser),
+            $this->getService(MailerInterface::class),
+        );
+
+        $email = $mailerFactory->createEmailMessage(
+            'test_body_only_message',
+            ['sender@example.com' => 'Sender'],
+            ['recipient@example.com' => 'Recipient'],
+            [],
+            'en_US',
+        );
+
+        self::assertSame('<p>Stored body</p>', $email->getHtmlBody());
+        self::assertSame('Stored body', $email->getTextBody());
+    }
+
     public function testSendDoesNotThrowWithNullTransport(): void
     {
         $email = $this->mailerFactory->createSimpleEmailMessage(
@@ -130,5 +283,56 @@ final class MailerFactoryTest extends IntegrationTestCase
         // should complete without error.
         $this->mailerFactory->send($email);
         self::assertTrue(true);
+    }
+
+    /**
+     * The situation of an install whose parsers all verify that a template file exists
+     * (the Twig parser always did, the Smarty parser does since TheliaSmarty 3.0.1): a
+     * view no theme ships is claimed by nobody, and only getDefaultParser() answers.
+     */
+    private function createParserResolverWhereNoParserClaimsAView(ParserInterface $defaultParser): ParserResolver
+    {
+        return new class($this->getService(RequestStack::class), $this->getService(TemplateHelperInterface::class), $defaultParser) extends ParserResolver {
+            public function __construct(
+                RequestStack $requestStack,
+                TemplateHelperInterface $templateHelper,
+                private readonly ParserInterface $defaultParser,
+            ) {
+                parent::__construct([], [], $requestStack, $templateHelper);
+            }
+
+            public function getParser(string $pathTemplate, ?string $templateName): ParserInterface
+            {
+                throw new ResourceNotFoundException(\sprintf('Parser for template %s not found', $templateName));
+            }
+
+            public function getDefaultParser(): ParserInterface
+            {
+                return $this->defaultParser;
+            }
+        };
+    }
+
+    private function createParserResolverReturning(ParserInterface $parser): ParserResolver
+    {
+        return new class($this->getService(RequestStack::class), $this->getService(TemplateHelperInterface::class), $parser) extends ParserResolver {
+            public function __construct(
+                RequestStack $requestStack,
+                TemplateHelperInterface $templateHelper,
+                private readonly ParserInterface $parser,
+            ) {
+                parent::__construct([], [], $requestStack, $templateHelper);
+            }
+
+            public function getParser(string $pathTemplate, ?string $templateName): ParserInterface
+            {
+                return $this->parser;
+            }
+
+            public function getDefaultParser(): ParserInterface
+            {
+                return $this->parser;
+            }
+        };
     }
 }

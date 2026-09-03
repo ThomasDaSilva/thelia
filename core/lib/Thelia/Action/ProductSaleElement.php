@@ -31,6 +31,7 @@ use Thelia\Core\Event\UpdatePositionEvent;
 use Thelia\Core\Template\Loop\ProductSaleElementsDocument;
 use Thelia\Core\Template\Loop\ProductSaleElementsImage;
 use Thelia\Core\Translation\Translator;
+use Thelia\Log\Tlog;
 use Thelia\Model\AttributeAvQuery;
 use Thelia\Model\AttributeCombination;
 use Thelia\Model\AttributeCombinationQuery;
@@ -103,7 +104,7 @@ class ProductSaleElement extends BaseAction implements EventSubscriberInterface
 
             // Store all the stuff !
             $con->commit();
-        } catch (\Exception $exception) {
+        } catch (\Throwable $exception) {
             $con->rollback();
 
             throw $exception;
@@ -198,7 +199,7 @@ class ProductSaleElement extends BaseAction implements EventSubscriberInterface
 
             // Store all the stuff !
             $con->commit();
-        } catch (\Exception $exception) {
+        } catch (\Throwable $exception) {
             $con->rollback();
 
             throw $exception;
@@ -251,7 +252,7 @@ class ProductSaleElement extends BaseAction implements EventSubscriberInterface
 
                 // Store all the stuff !
                 $con->commit();
-            } catch (\Exception $ex) {
+            } catch (\Throwable $ex) {
                 $con->rollback();
 
                 throw $ex;
@@ -304,7 +305,7 @@ class ProductSaleElement extends BaseAction implements EventSubscriberInterface
 
             // Store all the stuff !
             $con->commit();
-        } catch (\Exception $exception) {
+        } catch (\Throwable $exception) {
             $con->rollback();
 
             throw $exception;
@@ -386,7 +387,46 @@ class ProductSaleElement extends BaseAction implements EventSubscriberInterface
             if (null !== $originalProductPSEDocuments) {
                 $this->clonePSEAssociatedFiles($clonedProduct->getId(), $clonedProductPSEId, $originalProductPSEDocuments, $type = 'document');
             }
+
+            $this->cloneVirtualDocumentAssociation($event, $originalProductPSE, $clonedProductPSEId);
         }
+    }
+
+    /**
+     * Point the cloned sale element at the clone's own copy of the document a virtual
+     * product is downloaded from. The association is copied whenever the source has one,
+     * whether or not the product is currently flagged as virtual.
+     */
+    private function cloneVirtualDocumentAssociation(ProductCloneEvent $event, ProductSaleElements $originalPse, int $clonedPseId): void
+    {
+        $originalDocument = $originalPse->getVirtualDocument();
+
+        if (null === $originalDocument) {
+            return;
+        }
+
+        $clonedDocumentId = $event->getClonedDocumentId($originalDocument->getId());
+
+        if (null === $clonedDocumentId) {
+            // The source document was not copied — its file is missing from the disk, or it
+            // belongs to another product. Reusing the source id would make the clone depend
+            // on a file deleted along with the original product, so the clone is left without
+            // a virtual document and the merchant has to pick one.
+            Tlog::getInstance()->addWarning(
+                \sprintf(
+                    'Product clone %s: sale element %d has no virtual document, the document %d of the source product was not copied.',
+                    $event->getClonedProduct()->getRef(),
+                    $clonedPseId,
+                    $originalDocument->getId()
+                )
+            );
+
+            return;
+        }
+
+        $clonedPse = ProductSaleElementsQuery::create()->findPk($clonedPseId);
+
+        $clonedPse?->setVirtualDocument($clonedDocumentId);
     }
 
     /**

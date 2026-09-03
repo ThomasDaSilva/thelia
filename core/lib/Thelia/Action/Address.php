@@ -14,7 +14,6 @@ declare(strict_types=1);
 
 namespace Thelia\Action;
 
-use Propel\Runtime\Exception\PropelException;
 use Propel\Runtime\Propel;
 use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
@@ -70,6 +69,8 @@ class Address extends BaseAction implements EventSubscriberInterface
         $con = Propel::getWriteConnection(AddressTableMap::DATABASE_NAME);
         $con->beginTransaction();
 
+        $isNewAddress = $addressModel->isNew();
+
         try {
             $addressModel
                 ->setLabel($event->getLabel())
@@ -86,18 +87,26 @@ class Address extends BaseAction implements EventSubscriberInterface
                 ->setCellphone((string) $event->getCellphone())
                 ->setPhone((string) $event->getPhone())
                 ->setCompany($event->getCompany())
+                ->setSiret($event->getSiret())
+                ->setVatNumber($event->getVatNumber())
                 ->save();
 
-            if ($event->getIsDefault() && !$addressModel->getIsDefault()) {
+            // A customer whose addresses are all is_default = 0 has no default address at all:
+            // getDefaultAddress() returns null and every caller relying on it breaks. The first
+            // address a customer gets therefore becomes the default one, whatever the form sent.
+            $becomesDefault = $event->getIsDefault()
+                || ($isNewAddress && null === $addressModel->getCustomer()?->getDefaultAddress());
+
+            if ($becomesDefault && !$addressModel->getIsDefault()) {
                 $addressModel->makeItDefault();
             }
 
             $event->setAddress($addressModel);
             $con->commit();
-        } catch (PropelException $propelException) {
+        } catch (\Throwable $throwable) {
             $con->rollback();
 
-            throw $propelException;
+            throw $throwable;
         }
     }
 

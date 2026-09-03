@@ -14,15 +14,20 @@ declare(strict_types=1);
 
 namespace Thelia\Api\Bridge\Propel\Filter\CustomFilters\Filters;
 
+use Propel\Runtime\ActiveQuery\Criteria;
 use Propel\Runtime\ActiveQuery\ModelCriteria;
 use Propel\Runtime\ActiveRecord\ActiveRecordInterface;
+use Thelia\Api\Bridge\Propel\Filter\CustomFilters\Filters\Interface\TheliaAggregatedFilterInterface;
 use Thelia\Api\Bridge\Propel\Filter\CustomFilters\Filters\Interface\TheliaFilterInterface;
 use Thelia\Api\Resource\FilterValue;
 use Thelia\Model\Brand;
+use Thelia\Model\BrandQuery;
+use Thelia\Model\ProductQuery;
 
-class BrandFilter implements TheliaFilterInterface
+class BrandFilter implements TheliaFilterInterface, TheliaAggregatedFilterInterface
 {
     use LocalizedTitleTrait;
+    use SelectedValuesTrait;
 
     public function getResourceType(): array
     {
@@ -36,11 +41,15 @@ class BrandFilter implements TheliaFilterInterface
 
     public function filter(ModelCriteria $query, $value, bool $isMinOrMaxFilter = false, ?int $categoryDepth = null): void
     {
-        foreach ($value as $id => $childValue) {
-            foreach ($childValue as $type => $brandId) {
-                $query->filterByBrandId($brandId);
-            }
+        $brandIds = $this->flattenSelectedValues($value);
+
+        if ($brandIds === []) {
+            return;
         }
+
+        // A product has one brand, so two checked brands can only be asked for as one IN:
+        // one equality per brand would AND two exclusive conditions and match nothing.
+        $query->filterByBrandId($brandIds, Criteria::IN);
     }
 
     public function getValue(ActiveRecordInterface $activeRecord, string $locale, $valueSearched = null, ?int $depth = 1): ?array
@@ -56,5 +65,49 @@ class BrandFilter implements TheliaFilterInterface
                 ->setId($brand->getId())
                 ->setTitle($this->localizedTitle($brand, $locale)),
         ];
+    }
+
+    /**
+     * The brands of a product set, each with the number of products carrying it, are one
+     * GROUP BY away; reading them product by product is what made this expensive.
+     */
+    public function getAggregatedValues(array $resourceIds, string $locale, $valueSearched = null, ?int $depth = 1): array
+    {
+        if ($resourceIds === []) {
+            return [];
+        }
+
+        $rows = ProductQuery::create()
+            ->filterById($resourceIds, Criteria::IN)
+            ->filterByBrandId(null, Criteria::ISNOTNULL)
+            ->withColumn('COUNT(*)', 'ProductCount')
+            ->select(['BrandId', 'ProductCount'])
+            ->groupBy('BrandId')
+            ->find()
+            ->getData();
+
+        if ($rows === []) {
+            return [];
+        }
+
+        $counts = array_column($rows, 'ProductCount', 'BrandId');
+
+        $brands = BrandQuery::create()
+            ->filterById(array_keys($counts), Criteria::IN)
+            ->joinWithI18n($locale)
+            ->orderByPosition()
+            ->find();
+
+        $values = [];
+
+        foreach ($brands as $brand) {
+            $values[] =
+                (new FilterValue())
+                    ->setId($brand->getId())
+                    ->setTitle($this->localizedTitle($brand, $locale))
+                    ->setCount((int) $counts[$brand->getId()]);
+        }
+
+        return $values;
     }
 }

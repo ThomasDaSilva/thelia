@@ -17,13 +17,19 @@ namespace Thelia\Tests\Integration\Action;
 use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 use Thelia\Core\Event\Customer\CustomerCreateOrUpdateEvent;
 use Thelia\Core\Event\Customer\CustomerCreateOrUpdateMinimalEvent;
+use Thelia\Core\Event\DefaultActionEvent;
 use Thelia\Core\Event\TheliaEvents;
+use Thelia\Model\ConfigQuery;
+use Thelia\Model\Customer;
 use Thelia\Model\CustomerQuery;
 use Thelia\Test\FixtureFactory;
 use Thelia\Test\IntegrationTestCase;
+use Thelia\Test\Trait\LogsInAsCustomer;
 
 final class CustomerActionTest extends IntegrationTestCase
 {
+    use LogsInAsCustomer;
+
     private EventDispatcherInterface $dispatcher;
     private FixtureFactory $factory;
 
@@ -85,6 +91,50 @@ final class CustomerActionTest extends IntegrationTestCase
         self::assertTrue((bool) $customer->getReseller());
     }
 
+    public function testAccountConfirmationEmailCarriesTheActivationCode(): void
+    {
+        $emailConfirmationWasEnabled = ConfigQuery::isCustomerEmailConfirmationEnable();
+        $storeEmail = ConfigQuery::getStoreEmail();
+
+        ConfigQuery::write('customer_email_confirmation', '1');
+        // A shop without a sender address sends nothing at all, and the test
+        // database is seeded without one.
+        ConfigQuery::write('store_email', 'shop@test.com');
+
+        try {
+            $event = new CustomerCreateOrUpdateMinimalEvent();
+            $event
+                ->setTitle($this->factory->customerTitle()->getId())
+                ->setFirstname('Ada')
+                ->setLastname('Confirm')
+                ->setEmail('activation.code@test.com')
+                ->setPassword('Str0ng-Passw0rd!2026');
+
+            $this->dispatcher->dispatch($event, TheliaEvents::CREATE_CUSTOMER_MINIMAL);
+
+            $customer = $event->getCustomer();
+            self::assertNotNull($customer);
+            self::assertNotNull($customer->getConfirmationToken(), 'The account is waiting for its activation code');
+
+            $sentEmails = $this->getService('mailer.message_logger_listener')->getEvents()->getMessages();
+            self::assertCount(1, $sentEmails, 'One registration sends one email');
+
+            $email = $sentEmails[0];
+
+            // The subject comes from the message_i18n row of customer_send_code: an
+            // account created on a shop whose seed lacks that row mails an empty one.
+            self::assertNotSame('', (string) $email->getSubject(), 'The activation email has a subject');
+            self::assertMatchesRegularExpression(
+                '/\b\d{'.Customer::CODE_LENGTH.'}\b/',
+                (string) $email->getTextBody(),
+                'The activation email carries the code the activation page asks for',
+            );
+        } finally {
+            ConfigQuery::write('customer_email_confirmation', $emailConfirmationWasEnabled ? '1' : '0');
+            ConfigQuery::write('store_email', (string) $storeEmail);
+        }
+    }
+
     public function testUpdateAccountOfCustomerWithoutAddressCreatesTheDefaultAddress(): void
     {
         $title = $this->factory->customerTitle();
@@ -144,5 +194,26 @@ final class CustomerActionTest extends IntegrationTestCase
             ->findOne();
 
         self::assertNull($result, 'Transaction rollback should have removed the customer from the previous test');
+    }
+
+    public function testLogoutRetiresTheRememberMeToken(): void
+    {
+        $customer = $this->factory->customer($this->factory->customerTitle());
+        $customer->setRememberMeToken('issued-at-login')->save();
+        $this->loginAsCustomerInSession($customer);
+
+        $this->dispatcher->dispatch(new DefaultActionEvent(), TheliaEvents::CUSTOMER_LOGOUT);
+
+        self::assertNull(CustomerQuery::create()->findPk($customer->getId())->getRememberMeToken());
+    }
+
+    public function testANewPasswordRetiresTheRememberMeToken(): void
+    {
+        $customer = $this->factory->customer($this->factory->customerTitle());
+        $customer->setRememberMeToken('issued-under-the-old-password')->save();
+
+        $customer->setPassword('brand-new-password')->save();
+
+        self::assertNull(CustomerQuery::create()->findPk($customer->getId())->getRememberMeToken());
     }
 }

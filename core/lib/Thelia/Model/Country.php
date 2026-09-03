@@ -58,6 +58,27 @@ class Country extends BaseCountry
     }
 
     /**
+     * Whether a customer has a state to pick for this country.
+     *
+     * `has_states` says a state is mandatory, not that the country carries any: a
+     * country may hold states without requiring one (France and its departments), and
+     * a country flagged as requiring one may hold none yet. What an address form can
+     * offer is therefore the visible state rows attached to the country, this method,
+     * while `has_states` only decides whether leaving the field empty is an error.
+     */
+    public function hasSelectableStates(): bool
+    {
+        if (null === $this->getId()) {
+            return false;
+        }
+
+        return StateQuery::create()
+            ->filterByCountryId($this->getId())
+            ->filterByVisible(1)
+            ->count() > 0;
+    }
+
+    /**
      * This method ensure backward compatibility to Thelia 2.1, where a country belongs to one and
      * only one shipping zone.
      *
@@ -100,10 +121,10 @@ class Country extends BaseCountry
                 ->save($con);
 
             $con->commit();
-        } catch (PropelException $propelException) {
+        } catch (\Throwable $throwable) {
             $con->rollBack();
 
-            throw $propelException;
+            throw $throwable;
         }
     }
 
@@ -130,6 +151,14 @@ class Country extends BaseCountry
         }
 
         return self::$defaultCountry;
+    }
+
+    /**
+     * @internal
+     */
+    public static function resetDefaultCountryCache(): void
+    {
+        self::$defaultCountry = null;
     }
 
     /**

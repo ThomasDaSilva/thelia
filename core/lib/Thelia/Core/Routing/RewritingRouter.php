@@ -72,6 +72,7 @@ class RewritingRouter implements RouterInterface, RequestMatcherInterface
         $pathInfo = $request->getRealPathInfo();
         $resolver = $this->resolveRewritingData($pathInfo);
 
+        $this->rejectObsoleteUrl($resolver);
         $this->maybeRedirectForRequestedLocale($request, $resolver);
         $this->ensureActiveLocaleOrRedirect($resolver);
         $this->maybeRedirectForManualRedirect($resolver);
@@ -104,6 +105,21 @@ class RewritingRouter implements RouterInterface, RequestMatcherInterface
         }
     }
 
+    /**
+     * Deleting an object does not delete its rewritten urls: Product::postDelete() and its
+     * siblings move them to the obsolete view instead (UrlRewritingTrait::markRewrittenUrlObsolete()).
+     * The object is gone, so there is no page left to serve and no current url to redirect to:
+     * such an url must answer 404, like any unknown one. An url that was merely replaced is a
+     * different case, kept in the rewriting table with its "redirected" target, and still
+     * answered with a 301 further down.
+     */
+    protected function rejectObsoleteUrl(RewritingResolver $resolver): void
+    {
+        if (ConfigQuery::getObsoleteRewrittenUrlView() === $resolver->view) {
+            throw new ResourceNotFoundException();
+        }
+    }
+
     protected function maybeRedirectForRequestedLocale(Request $request, RewritingResolver $resolver): void
     {
         $requestedLocale = $request->query->get('lang');
@@ -121,8 +137,31 @@ class RewritingRouter implements RouterInterface, RequestMatcherInterface
                 ->retrieve($resolver->view, $resolver->viewId, $requestedLang->getLocale())
                 ->toString();
 
-            $this->redirect(URL::getInstance()->absoluteUrl($localizedUrl), 301);
+            $this->redirect(
+                URL::getInstance()->absoluteUrl($localizedUrl, $this->requestedQueryParameters($request)),
+                301,
+            );
         }
+    }
+
+    /**
+     * The page has to survive the language switch, and so does its state: a paginated
+     * listing, a sort order, a filter are all carried by the query string.
+     *
+     * They are read from the query string of the request and not from the query bag, which
+     * applyRewritingAttributes() fills with the view id and with the parameters encoded in
+     * the rewritten url. Those are internal to the rewriting and have no business being
+     * written back into a public url. "lang" is dropped as well: it has been consumed here,
+     * and the url it points to already is the one of the requested language.
+     */
+    private function requestedQueryParameters(Request $request): array
+    {
+        $parameters = [];
+        parse_str((string) $request->getQueryString(), $parameters);
+
+        unset($parameters['lang']);
+
+        return $parameters;
     }
 
     protected function ensureActiveLocaleOrRedirect(RewritingResolver $resolver): void
@@ -188,16 +227,49 @@ class RewritingRouter implements RouterInterface, RequestMatcherInterface
 
         $currentLang = $request->getSession()->getLang();
 
-        if ($lang->getLocale() !== $currentLang?->getLocale()) {
-            if (ConfigQuery::isMultiDomainActivated()) {
-                $this->redirect(
-                    \sprintf('%s/%s', $lang->getUrl(), $resolver->rewrittenUrl),
-                    301,
-                );
-            } else {
-                $this->langService->setLang($lang);
+        if ($lang->getLocale() === $currentLang?->getLocale()) {
+            return;
+        }
+
+        if (ConfigQuery::isMultiDomainActivated()) {
+            $domainUrl = rtrim((string) $lang->getUrl(), '/');
+            $targetUrl = $domainUrl.'/'.$resolver->rewrittenUrl;
+
+            // An empty lang.url - the state of a fresh install until the per language domains
+            // are filled in - or a domain equal to the one being browsed makes that redirect
+            // point at the url that was just asked for, and a browser follows it until it gives
+            // up. Switch the session language and serve the page, as in single domain mode.
+            if ('' !== $domainUrl && !$this->isCurrentUrl($request, $targetUrl)) {
+                $this->redirect($targetUrl, 301);
             }
         }
+
+        $this->langService->setLang($lang);
+    }
+
+    /**
+     * A redirect to the url being served is never a useful answer: it only tells the browser
+     * to ask the same question again. Queries are ignored on purpose, since dropping them
+     * still lands on the same page, and so still loops.
+     */
+    private function isCurrentUrl(TheliaRequest $request, string $url): bool
+    {
+        $target = parse_url($url);
+
+        if (false === $target) {
+            return false;
+        }
+
+        // A host-less target is relative to the host being browsed.
+        $sameHost = !isset($target['host'])
+            || (
+                $target['host'] === $request->getHost()
+                && ($target['scheme'] ?? $request->getScheme()) === $request->getScheme()
+                && ($target['port'] ?? $request->getPort()) === $request->getPort()
+            );
+
+        return $sameHost
+            && trim($target['path'] ?? '', '/') === trim($request->getRealPathInfo(), '/');
     }
 
     private function defaultRouteParams(): array

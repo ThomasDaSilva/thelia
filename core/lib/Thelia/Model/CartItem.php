@@ -22,11 +22,13 @@ use Thelia\Core\Event\Cart\CartItemEvent;
 use Thelia\Core\Event\TheliaEvents;
 use Thelia\Core\Translation\Translator;
 use Thelia\Domain\Cart\Exception\NotEnoughStockException;
-use Thelia\Domain\Taxation\TaxEngine\Calculator;
+use Thelia\Domain\Taxation\TaxEngine\TaxCalculatorResolverTrait;
 use Thelia\Model\Base\CartItem as BaseCartItem;
 
 class CartItem extends BaseCartItem
 {
+    use TaxCalculatorResolverTrait;
+
     protected ?EventDispatcherInterface $dispatcher = null;
 
     public function setDispatcher(EventDispatcherInterface $dispatcher): void
@@ -122,6 +124,10 @@ class CartItem extends BaseCartItem
      */
     public function addQuantity($value)
     {
+        if ($value <= 0) {
+            return $this;
+        }
+
         $currentQuantity = $this->getQuantity();
         $newQuantity = $currentQuantity + $value;
 
@@ -179,9 +185,7 @@ class CartItem extends BaseCartItem
      */
     public function getTaxedPrice(Country $country, ?State $state = null): float
     {
-        $taxCalculator = new Calculator();
-
-        return $taxCalculator->load($this->getProduct(), $country, $state)->getTaxedPrice((float) $this->getPrice());
+        return $this->createTaxCalculator()->load($this->getProduct(), $country, $state)->getTaxedPrice((float) $this->getPrice());
     }
 
     /**
@@ -189,9 +193,7 @@ class CartItem extends BaseCartItem
      */
     public function getTaxedPromoPrice(Country $country, ?State $state = null): float
     {
-        $taxCalculator = new Calculator();
-
-        return $taxCalculator->load($this->getProduct(), $country, $state)->getTaxedPrice((float) $this->getPromoPrice());
+        return $this->createTaxCalculator()->load($this->getProduct(), $country, $state)->getTaxedPrice((float) $this->getPromoPrice());
     }
 
     /**
@@ -207,7 +209,7 @@ class CartItem extends BaseCartItem
      */
     public function getTotalTaxedPrice(Country $country, ?State $state = null): float
     {
-        return round($this->getTaxedPrice($country, $state), 2) * $this->getQuantity();
+        return $this->lineTotal($this->getTaxedPrice($country, $state));
     }
 
     /**
@@ -215,21 +217,37 @@ class CartItem extends BaseCartItem
      */
     public function getTotalTaxedPromoPrice(Country $country, ?State $state = null)
     {
-        return round($this->getTaxedPromoPrice($country, $state), 2) * $this->getQuantity();
+        return $this->lineTotal($this->getTaxedPromoPrice($country, $state));
     }
 
     public function getTotalPrice(): float
     {
-        return round((float) $this->getPrice(), 2) * $this->getQuantity();
+        return $this->lineTotal((float) $this->getPrice());
     }
 
     public function getTotalPromoPrice(): float
     {
-        return round((float) $this->getPromoPrice(), 2) * $this->getQuantity();
+        return $this->lineTotal((float) $this->getPromoPrice());
     }
 
     public function getTotalRealPrice(): float
     {
-        return round($this->getRealPrice(), 2) * $this->getQuantity();
+        return $this->lineTotal($this->getRealPrice());
+    }
+
+    /**
+     * Turns a unit price into a line total, rounding where the shop's
+     * order_rounding_mode says to round.
+     *
+     * Order::getTotalAmount() has to reach the same figure from the persisted
+     * order lines, so any change here belongs there too.
+     */
+    private function lineTotal(float $unitPrice): float
+    {
+        if (ConfigQuery::isRoundingModeRoundingOfSums()) {
+            return round($unitPrice * $this->getQuantity(), 2);
+        }
+
+        return round($unitPrice, 2) * $this->getQuantity();
     }
 }

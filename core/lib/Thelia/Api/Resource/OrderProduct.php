@@ -32,7 +32,9 @@ use Thelia\Api\Bridge\Propel\Filter\BooleanFilter;
 use Thelia\Api\Bridge\Propel\Filter\SearchFilter;
 use Thelia\Model\AttributeCombination;
 use Thelia\Model\AttributeCombinationQuery;
+use Thelia\Model\ConfigQuery;
 use Thelia\Model\Map\OrderProductTableMap;
+use Thelia\Model\OrderProduct as OrderProductModel;
 use Thelia\Model\ProductQuery;
 
 #[ApiResource(
@@ -110,7 +112,9 @@ class OrderProduct implements PropelResourceInterface
     ])]
     public ?int $id = null;
 
-    #[Relation(targetResource: Order::class)]
+    // hydrateOutOfGroups: the account endpoint checks `object.order.customer`
+    // before answering with a line.
+    #[Relation(targetResource: Order::class, hydrateOutOfGroups: true)]
     #[Groups([self::GROUP_ADMIN_READ_SINGLE, self::GROUP_FRONT_READ])]
     public Order $order;
 
@@ -183,7 +187,9 @@ class OrderProduct implements PropelResourceInterface
         self::GROUP_FRONT_READ,
     ])]
     #[NotBlank(groups: [Order::GROUP_ADMIN_WRITE])]
-    public int $quantity;
+    // order_product.quantity is a FLOAT: a line of goods sold by weight carries
+    // grams, not units. An int here billed 300.5 g as 300 g.
+    public float $quantity;
 
     #[Groups([
         self::GROUP_ADMIN_READ,
@@ -266,7 +272,13 @@ class OrderProduct implements PropelResourceInterface
     #[Groups([self::GROUP_ADMIN_READ, self::GROUP_ADMIN_WRITE, Order::GROUP_ADMIN_WRITE, self::GROUP_FRONT_READ_SINGLE])]
     public ?int $parent = null;
 
-    #[Groups([self::GROUP_ADMIN_READ, self::GROUP_ADMIN_WRITE, Order::GROUP_ADMIN_WRITE, self::GROUP_FRONT_READ_SINGLE])]
+    #[Groups([
+        self::GROUP_ADMIN_READ,
+        self::GROUP_ADMIN_WRITE,
+        Order::GROUP_ADMIN_WRITE,
+        Order::GROUP_FRONT_READ_SINGLE,
+        self::GROUP_FRONT_READ_SINGLE,
+    ])]
     #[Type(type: 'bool', groups: [Order::GROUP_ADMIN_WRITE])]
     #[NotNull(groups: [Order::GROUP_ADMIN_WRITE])]
     public bool $virtual;
@@ -275,9 +287,10 @@ class OrderProduct implements PropelResourceInterface
         self::GROUP_ADMIN_READ,
         self::GROUP_ADMIN_WRITE,
         Order::GROUP_ADMIN_WRITE,
+        Order::GROUP_FRONT_READ_SINGLE,
         self::GROUP_FRONT_READ_SINGLE,
     ])]
-    public ?bool $virtualDocument = null;
+    public ?string $virtualDocument = null;
 
     #[Groups([self::GROUP_ADMIN_READ, self::GROUP_FRONT_READ_SINGLE])]
     public ?\DateTime $createdAt = null;
@@ -435,12 +448,12 @@ class OrderProduct implements PropelResourceInterface
         return $this;
     }
 
-    public function getQuantity(): int
+    public function getQuantity(): float
     {
         return $this->quantity;
     }
 
-    public function setQuantity(int $quantity): self
+    public function setQuantity(float $quantity): self
     {
         $this->quantity = $quantity;
 
@@ -449,7 +462,7 @@ class OrderProduct implements PropelResourceInterface
 
     public function getPrice(): float
     {
-        return round($this->price, 2);
+        return $this->unitAmount($this->price);
     }
 
     public function setPrice(float $price): self
@@ -461,7 +474,7 @@ class OrderProduct implements PropelResourceInterface
 
     public function getPromoPrice(): ?float
     {
-        return round($this->promoPrice, 2);
+        return null === $this->promoPrice ? null : $this->unitAmount($this->promoPrice);
     }
 
     public function setPromoPrice(?float $promoPrice): self
@@ -473,7 +486,28 @@ class OrderProduct implements PropelResourceInterface
 
     public function getUnitTaxedPrice(): ?float
     {
-        return round($this->unitTaxedPrice, 2);
+        return null === $this->unitTaxedPrice ? null : $this->unitAmount($this->unitTaxedPrice);
+    }
+
+    /**
+     * Exposes a unit amount with the precision the order total was built from.
+     *
+     * Under sum of roundings the total multiplies unit amounts already rounded
+     * to the cent, so the cent is what the line was charged on. Under rounding
+     * of sums the total keeps the stored precision, and a unit price cut to the
+     * cent here would no longer multiply up to the total the customer paid --
+     * which is the whole point of a price per gram or per millilitre.
+     */
+    private function unitAmount(float $amount): float
+    {
+        $propelModel = $this->getPropelModel();
+        $orderId = $propelModel instanceof OrderProductModel ? $propelModel->getOrderId() : null;
+
+        if (ConfigQuery::isRoundingModeRoundingOfSums($orderId)) {
+            return $amount;
+        }
+
+        return round($amount, 2);
     }
 
     public function isWasNew(): bool
@@ -572,12 +606,12 @@ class OrderProduct implements PropelResourceInterface
         return $this;
     }
 
-    public function getVirtualDocument(): ?bool
+    public function getVirtualDocument(): ?string
     {
         return $this->virtualDocument;
     }
 
-    public function setVirtualDocument(?bool $virtualDocument): self
+    public function setVirtualDocument(?string $virtualDocument): self
     {
         $this->virtualDocument = $virtualDocument;
 
@@ -622,35 +656,35 @@ class OrderProduct implements PropelResourceInterface
 
     public function afterModelToResource(array $context): void
     {
-        if (isset($context['operation']) && ($context['operation'] instanceof Get || $context['operation'] instanceof GetCollection)) {
-            // unitTaxedPrice
-            $totalTax = 0;
-            $totalPromoTax = 0;
+        $operation = $context['operation'] ?? null;
 
-            if ([] !== $this->orderProductTaxes) {
-                /** @var OrderProductTax $orderProductTax */
-                foreach ($this->orderProductTaxes as $orderProductTax) {
-                    /** @var \Thelia\Model\OrderProductTax $orderProductTax */
-                    $propelOrderProductTax = $orderProductTax->getPropelModel();
-
-                    if (!$this->getPropelModel()->getWasInPromo()) {
-                        $totalTax += (float) $propelOrderProductTax->getAmount();
-                    }
-
-                    if ($this->getPropelModel()->getWasInPromo()) {
-                        $totalPromoTax += (float) $propelOrderProductTax->getPromoAmount();
-                    }
-                }
-
-                if (!$this->getPropelModel()->getWasInPromo()) {
-                    $this->unitTaxedPrice = $this->getPropelModel()->getPrice() + $totalTax;
-                }
-
-                if ($this->getPropelModel()->getWasInPromo()) {
-                    $this->unitTaxedPrice = $this->getPropelModel()->getPrice() + $totalPromoTax;
-                }
-            }
+        if (!$operation instanceof Get && !$operation instanceof GetCollection) {
+            return;
         }
+
+        $propelModel = $this->getPropelModel();
+
+        if (!$propelModel instanceof OrderProductModel) {
+            return;
+        }
+
+        // The taxes are read from the model, not from $orderProductTaxes: that
+        // relation belongs to the single read only, while unitTaxedPrice is
+        // returned by the collections too.
+        $taxes = $propelModel->getOrderProductTaxes();
+
+        if (0 === $taxes->count()) {
+            return;
+        }
+
+        $wasInPromo = (bool) $propelModel->getWasInPromo();
+        $totalTax = 0.0;
+
+        foreach ($taxes as $tax) {
+            $totalTax += (float) ($wasInPromo ? $tax->getPromoAmount() : $tax->getAmount());
+        }
+
+        $this->unitTaxedPrice = (float) $propelModel->getPrice() + $totalTax;
     }
 
     public static function getPropelRelatedTableMap(): ?TableMap

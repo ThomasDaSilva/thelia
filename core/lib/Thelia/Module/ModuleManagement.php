@@ -74,12 +74,17 @@ class ModuleManagement
             $modulesUpdated = [];
 
             foreach ($finder as $file) {
+                $filePath = $file->getRealPath();
+
                 try {
-                    $filePath = $file->getRealPath();
                     $modulesUpdated[] = $this->updateModule($file, $container);
-                } catch (\Exception $ex) {
+                } catch (\Throwable $ex) {
+                    // A module failing on a PHP Error (a stale constant, a missing class) must not
+                    // abort the refresh of the other modules.
                     // Guess module code
                     $moduleCode = basename(\dirname($filePath, 2));
+
+                    Tlog::getInstance()->addError('Failed to refresh module '.$moduleCode, $ex);
 
                     $errors[$moduleCode] = $ex;
                 }
@@ -100,7 +105,7 @@ class ModuleManagement
      * @throws \Exception
      * @throws PropelException
      */
-    public function updateModule(\SplFileInfo $file, ContainerInterface $container): Module
+    public function updateModule(\SplFileInfo $file, ContainerInterface $container, bool $forceHookRegistration = false): Module
     {
         $descriptorValidator = $this->getDescriptorValidator();
 
@@ -163,12 +168,16 @@ class ModuleManagement
                 $instance->update($currentVersion, $version, $con);
             }
 
-            if ('none' !== $action) {
+            // $forceHookRegistration covers the module whose files were just replaced without a
+            // version bump: the hooks it now declares still have to be registered.
+            // createOrUpdateHook() is idempotent, and the positions the administrator set
+            // live in module_hook, which this does not touch.
+            if ('none' !== $action || $forceHookRegistration) {
                 $instance->registerHooks();
             }
 
             $con->commit();
-        } catch (\Exception $exception) {
+        } catch (\Throwable $exception) {
             Tlog::getInstance()->addError('Failed to update module '.$module->getCode(), $exception);
 
             $con->rollBack();

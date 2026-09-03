@@ -19,7 +19,7 @@ use Propel\Runtime\Connection\ConnectionInterface;
 use Propel\Runtime\Exception\PropelException;
 use Propel\Runtime\Propel;
 use Thelia\Core\File\FileModelParentInterface;
-use Thelia\Domain\Taxation\TaxEngine\Calculator;
+use Thelia\Domain\Taxation\TaxEngine\TaxCalculatorResolverTrait;
 use Thelia\Model\Base\Product as BaseProduct;
 use Thelia\Model\Map\ProductTableMap;
 use Thelia\Model\Tools\PositionManagementTrait;
@@ -28,6 +28,7 @@ use Thelia\Model\Tools\UrlRewritingTrait;
 class Product extends BaseProduct implements FileModelParentInterface
 {
     use PositionManagementTrait;
+    use TaxCalculatorResolverTrait;
     use UrlRewritingTrait;
 
     public function getRewrittenUrlViewName()
@@ -48,16 +49,12 @@ class Product extends BaseProduct implements FileModelParentInterface
 
     public function getTaxedPrice(Country $country, $price, ?State $state = null)
     {
-        $taxCalculator = new Calculator();
-
-        return $taxCalculator->load($this, $country, $state)->getTaxedPrice((float) $price);
+        return $this->createTaxCalculator()->load($this, $country, $state)->getTaxedPrice((float) $price);
     }
 
     public function getTaxedPromoPrice(Country $country, $price, ?State $state = null)
     {
-        $taxCalculator = new Calculator();
-
-        return $taxCalculator->load($this, $country, $state)->getTaxedPrice((float) $price);
+        return $this->createTaxCalculator()->load($this, $country, $state)->getTaxedPrice((float) $price);
     }
 
     /**
@@ -187,7 +184,7 @@ class Product extends BaseProduct implements FileModelParentInterface
 
             // Store all the stuff !
             $con->commit();
-        } catch (\Exception $exception) {
+        } catch (\Throwable $exception) {
             $con->rollback();
 
             throw $exception;

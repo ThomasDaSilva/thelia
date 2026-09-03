@@ -22,8 +22,6 @@ use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Thelia\Core\Archiver\ArchiverInterface;
 use Thelia\Core\Archiver\ArchiverManager;
-use Thelia\Core\DependencyInjection\Compiler\RegisterArchiverPass;
-use Thelia\Core\DependencyInjection\Compiler\RegisterSerializerPass;
 use Thelia\Core\Serializer\SerializerInterface;
 use Thelia\Core\Serializer\SerializerManager;
 use Thelia\Domain\DataTransfer\ExportHandler;
@@ -38,6 +36,14 @@ use Thelia\Model\LangQuery;
 #[AsCommand(name: 'export', description: 'Export data')]
 class ExportCommand extends ContainerAwareCommand
 {
+    public function __construct(
+        private readonly ExportHandler $exportHandler,
+        private readonly SerializerManager $serializerManager,
+        private readonly ArchiverManager $archiverManager,
+    ) {
+        parent::__construct();
+    }
+
     protected function configure(): void
     {
         $this
@@ -63,6 +69,18 @@ class ExportCommand extends ContainerAwareCommand
                 InputOption::VALUE_REQUIRED,
                 'Locale for export',
                 'en_US',
+            )
+            ->addOption(
+                'start',
+                null,
+                InputOption::VALUE_REQUIRED,
+                'Only export records created on or after this date, for the exports that support a date range.',
+            )
+            ->addOption(
+                'end',
+                null,
+                InputOption::VALUE_REQUIRED,
+                'Only export records created on or before this date, for the exports that support a date range.',
             )
             ->addOption(
                 'list-export',
@@ -111,31 +129,28 @@ class ExportCommand extends ContainerAwareCommand
             throw new \RuntimeException('Not enough arguments.'.\PHP_EOL.'If no options are provided, ref and serializer arguments are required.');
         }
 
-        /** @var ExportHandler $exportHandler */
-        $exportHandler = $this->getContainer()->get('thelia.export.handler');
-
-        $export = $exportHandler->getExportByRef($exportRef);
+        $export = $this->exportHandler->getExportByRef($exportRef);
 
         if (null === $export) {
             throw new \RuntimeException($exportRef." export doesn't exist.");
         }
 
-        $serializerManager = $this->getContainer()->get(RegisterSerializerPass::MANAGER_SERVICE_ID);
-        $serializer = $serializerManager->get($serializer);
+        $serializer = $this->serializerManager->get($serializer);
 
         $archiver = null;
 
         if ($input->getArgument('archiver')) {
-            /** @var ArchiverManager $archiverManager */
-            $archiverManager = $this->getContainer()->get(RegisterArchiverPass::MANAGER_SERVICE_ID);
-            $archiver = $archiverManager->get($input->getArgument('archiver'));
+            $archiver = $this->archiverManager->get($input->getArgument('archiver'));
         }
 
-        $exportEvent = $exportHandler->export(
+        $exportEvent = $this->exportHandler->export(
             $export,
             $serializer,
             $archiver,
             (new LangQuery())->findOneByLocale($input->getOption('locale')),
+            false,
+            false,
+            $this->readDateRange($input),
         );
 
         $formattedLine = $this->getHelper('formatter')->formatBlock(
@@ -148,6 +163,44 @@ class ExportCommand extends ContainerAwareCommand
         $output->writeln('<comment>'.$exportEvent->getFilePath().'</comment>');
 
         return 0;
+    }
+
+    /**
+     * A date range is optional: without one, an export covers every record.
+     * A single bound is honoured on its own.
+     *
+     * @return array{start: \DateTime|null, end: \DateTime|null}|null
+     */
+    protected function readDateRange(InputInterface $input): ?array
+    {
+        $start = $this->readDate($input, 'start');
+        $end = $this->readDate($input, 'end');
+
+        if (null === $start && null === $end) {
+            return null;
+        }
+
+        return ['start' => $start, 'end' => $end];
+    }
+
+    protected function readDate(InputInterface $input, string $option): ?\DateTime
+    {
+        $value = $input->getOption($option);
+
+        if (!\is_string($value) || '' === $value) {
+            return null;
+        }
+
+        // A day given without a time covers that whole day, as the back-office range does.
+        if ('end' === $option && 1 === preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) {
+            $value .= ' 23:59:59';
+        }
+
+        try {
+            return new \DateTime($value);
+        } catch (\Exception $exception) {
+            throw new \InvalidArgumentException(\sprintf('--%s is not a readable date: %s', $option, $value), 0, $exception);
+        }
     }
 
     /**
@@ -185,11 +238,8 @@ class ExportCommand extends ContainerAwareCommand
     {
         $table = new Table($output);
 
-        /** @var SerializerManager $serializerManager */
-        $serializerManager = $this->getContainer()->get(RegisterSerializerPass::MANAGER_SERVICE_ID);
-
         /** @var SerializerInterface $serializer */
-        foreach ($serializerManager->getSerializers() as $serializer) {
+        foreach ($this->serializerManager->getSerializers() as $serializer) {
             $table->addRow([
                 $serializer->getId(),
                 $serializer->getName(),
@@ -217,11 +267,8 @@ class ExportCommand extends ContainerAwareCommand
     {
         $table = new Table($output);
 
-        /** @var ArchiverManager $archiverManager */
-        $archiverManager = $this->getContainer()->get(RegisterArchiverPass::MANAGER_SERVICE_ID);
-
         /** @var ArchiverInterface $archiver */
-        foreach ($archiverManager->getArchivers(true) as $archiver) {
+        foreach ($this->archiverManager->getArchivers(true) as $archiver) {
             $table->addRow([
                 $archiver->getId(),
                 $archiver->getName(),

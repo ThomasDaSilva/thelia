@@ -22,6 +22,7 @@ use Thelia\Core\Event\ActionEvent;
 use Thelia\Core\Event\Customer\CustomerCreateOrUpdateEvent;
 use Thelia\Core\Event\Customer\CustomerCreateOrUpdateMinimalEvent;
 use Thelia\Core\Event\Customer\CustomerLoginEvent;
+use Thelia\Core\Event\Customer\CustomerResetPasswordEvent;
 use Thelia\Core\Event\LostPasswordEvent;
 use Thelia\Core\Event\TheliaEvents;
 use Thelia\Core\Security\SecurityContext;
@@ -29,15 +30,16 @@ use Thelia\Core\Translation\Translator;
 use Thelia\Domain\Cart\Service\CartContext;
 use Thelia\Domain\Cart\Service\CartRetriever;
 use Thelia\Domain\Customer\Exception\CustomerException;
+use Thelia\Domain\Customer\Exception\InvalidPasswordResetTokenException;
+use Thelia\Domain\Customer\Service\CustomerCodeManager;
 use Thelia\Domain\Customer\Service\CustomerTitleService;
+use Thelia\Domain\Customer\Service\PasswordResetService;
 use Thelia\Domain\Localization\Service\LangService;
 use Thelia\Mailer\MailerFactory;
 use Thelia\Model\ConfigQuery;
 use Thelia\Model\Customer as CustomerModel;
-use Thelia\Model\CustomerQuery;
 use Thelia\Model\Event\CustomerEvent;
 use Thelia\Model\LangQuery;
-use Thelia\Tools\Password;
 
 /**
  * customer class where all actions are managed.
@@ -57,6 +59,8 @@ class Customer extends BaseAction implements EventSubscriberInterface
         protected LangService $langService,
         protected CartRetriever $cartRetriever,
         protected CartContext $cartContext,
+        protected PasswordResetService $passwordResetService,
+        protected CustomerCodeManager $customerCodeManager,
     ) {
     }
 
@@ -111,22 +115,28 @@ class Customer extends BaseAction implements EventSubscriberInterface
         $event->setCustomer($customer);
     }
 
+    /**
+     * Send the customer what is needed to activate the account.
+     *
+     * This mails the activation code, which is the only mechanism the shipped
+     * front office knows: the `customer_confirmation` mail this used to send
+     * carries the Thelia 2 activation link, whose `/customer/confirm/{token}`
+     * route belongs to the Front module and disappears with it.
+     *
+     * @throws PropelException
+     */
     public function customerConfirmationEmail(CustomerEvent $event): void
     {
         $customer = $event->getModel();
 
-        if (ConfigQuery::isCustomerEmailConfirmationEnable() && $customer->getConfirmationToken() !== null) {
-            $validationCode = $customer->_validationCodeForEmail ?? '------';
-
-            $this->mailer->sendEmailToCustomer(
-                'customer_confirmation',
-                $customer,
-                [
-                    'customer_id' => $customer->getId(),
-                    'validation_code' => $validationCode,
-                ]
-            );
+        if (!ConfigQuery::isCustomerEmailConfirmationEnable() || null === $customer->getConfirmationToken()) {
+            return;
         }
+
+        // A fresh code on every send: the account was just created, or its owner
+        // asked for the code again, and the mail must carry the code the database
+        // will accept, not the one of an earlier attempt.
+        $this->customerCodeManager->createCodeAndSendIt($customer);
     }
 
     /**
@@ -242,6 +252,8 @@ class Customer extends BaseAction implements EventSubscriberInterface
             $event->getRef(),
             $event->getEmailUpdateAllowed(),
             $event->getState(),
+            siret: $event->getSiret(),
+            vatNumber: $event->getVatNumber(),
         );
 
         $event->setCustomer($customer);
@@ -276,24 +288,41 @@ class Customer extends BaseAction implements EventSubscriberInterface
      */
     public function logout(/* @noinspection PhpUnusedParameterInspection */ ActionEvent $event): void
     {
+        // The remember-me cookie is checked against the token stored on the account: the
+        // account forgets it here, so a copy of the cookie kept elsewhere stops working.
+        $customer = $this->securityContext->getCustomerUser();
+
+        if ($customer instanceof CustomerModel) {
+            $customer->setRememberMeToken(null)->save();
+        }
+
         $this->securityContext->clearCustomerUser();
     }
 
     /**
+     * Mail the owner of the given address a link to choose a new password.
+     *
+     * The address comes from whoever asked, so this must not act on the account behind
+     * it, and must answer the same way whether or not it names one.
+     *
      * @throws PropelException
      */
     public function lostPassword(LostPasswordEvent $event): void
     {
-        if (null === $customer = CustomerQuery::create()->filterByEmail($event->getEmail())->findOne()) {
-            return;
-        }
-        $password = Password::generateRandom(8);
+        $this->passwordResetService->requestResetLink((string) $event->getEmail());
+    }
 
-        $customer
-            ->setPassword($password)
-            ->save();
-
-        $this->mailer->sendEmailToCustomer('lost_password', $customer, ['password' => $password]);
+    /**
+     * Give the account named by a password reset link the password its owner chose.
+     *
+     * @throws InvalidPasswordResetTokenException when the link can no longer be used
+     * @throws PropelException
+     */
+    public function resetPassword(CustomerResetPasswordEvent $event): void
+    {
+        $event->setCustomer(
+            $this->passwordResetService->resetPassword($event->getToken(), $event->getPassword()),
+        );
     }
 
     public static function getSubscribedEvents(): array
@@ -307,6 +336,7 @@ class Customer extends BaseAction implements EventSubscriberInterface
             TheliaEvents::CUSTOMER_LOGIN => ['login', 128],
             TheliaEvents::CUSTOMER_DELETEACCOUNT => ['delete', 128],
             TheliaEvents::LOST_PASSWORD => ['lostPassword', 128],
+            TheliaEvents::CUSTOMER_RESET_PASSWORD => ['resetPassword', 128],
             TheliaEvents::SEND_ACCOUNT_CONFIRMATION_EMAIL => ['customerConfirmationEmail', 128],
         ];
     }

@@ -17,16 +17,15 @@ namespace Thelia\Form;
 use Symfony\Component\Form\Extension\Core\Type\FormType;
 use Symfony\Component\Form\Extension\Core\Type\HiddenType;
 use Symfony\Component\Form\Extension\Csrf\CsrfExtension;
-use Symfony\Component\Form\Extension\HttpFoundation\HttpFoundationExtension;
 use Symfony\Component\Form\Extension\Validator\ValidatorExtension;
 use Symfony\Component\Form\Form;
 use Symfony\Component\Form\FormBuilderInterface;
 use Symfony\Component\Form\FormFactoryBuilderInterface;
 use Symfony\Component\Form\FormInterface as SymfonyFormInterface;
-use Symfony\Component\Form\Forms;
 use Symfony\Component\Form\FormView;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Security\Csrf\CsrfTokenManager;
+use Symfony\Component\Security\Csrf\CsrfTokenManagerInterface;
 use Symfony\Component\Security\Csrf\TokenStorage\TokenStorageInterface;
 use Symfony\Component\Validator\Validation;
 use Symfony\Component\Validator\ValidatorBuilder;
@@ -69,22 +68,31 @@ abstract class BaseForm implements FormInterface
         string $type = FormType::class,
         array $data = [],
         array $options = [],
+        ?CsrfTokenManagerInterface $csrfTokenManager = null,
     ): void {
         $this->request = $request;
         $this->type = $type;
 
         $this->dispatcher = $eventDispatcher;
         $this->translator = $translator;
-        $this->formFactoryBuilder = $formFactoryBuilder;
+        // The injected builder is the shared service carrying the extensions, the types
+        // and the type extensions registered by the modules. Each form works on its own
+        // copy, so the CSRF and validator extensions added below for this form only never
+        // pile up on the instance the next form will be built from.
+        $this->formFactoryBuilder = clone $formFactoryBuilder;
         $this->validatorBuilder = $validationBuilder;
 
         $this->initFormWithRequest($type, $data, $options);
 
         if (!isset($options['csrf_protection']) || false !== $options['csrf_protection']) {
+            // The framework manager keeps session-bound tokens for the default token id (the
+            // form name) and switches to stateless, origin-based validation for the ids listed
+            // in framework.csrf_protection.stateless_token_ids, so a form rendered inside a
+            // cache can opt in through the 'csrf_token_id' option or its own name.
             $this->formFactoryBuilder
                 ->addExtension(
                     new CsrfExtension(
-                        new CsrfTokenManager(null, $tokenStorage),
+                        $csrfTokenManager ?? new CsrfTokenManager(null, $tokenStorage),
                     ),
                 );
         }
@@ -140,9 +148,6 @@ abstract class BaseForm implements FormInterface
     protected function initFormWithRequest($type, $data, $options): void
     {
         $this->validatorBuilder = Validation::createValidatorBuilder();
-
-        $this->formFactoryBuilder = Forms::createFormFactoryBuilder()
-            ->addExtension(new HttpFoundationExtension());
 
         $this->translator = Translator::getInstance();
 

@@ -23,6 +23,7 @@ use Symfony\Component\Security\Core\User\PasswordAuthenticatedUserInterface;
 use Symfony\Component\Security\Core\User\UserInterface as SecurityUserInterface;
 use Thelia\Core\Security\User\UserInterface;
 use Thelia\Core\Translation\Translator;
+use Thelia\Domain\Legal\CompanyIdentifier;
 use Thelia\Model\Base\Customer as BaseCustomer;
 use Thelia\Model\Exception\InvalidArgumentException;
 use Thelia\Model\Map\CustomerTableMap;
@@ -71,6 +72,8 @@ class Customer extends BaseCustomer implements UserInterface, SecurityUserInterf
         $ref = null,
         bool $forceEmailUpdate = false,
         ?int $stateId = null,
+        ?string $siret = null,
+        ?string $vatNumber = null,
     ): void {
         $this
             ->setTitleId($titleId)
@@ -106,6 +109,8 @@ class Customer extends BaseCustomer implements UserInterface, SecurityUserInterf
 
             $address
                 ->setCompany($company)
+                ->setSiret(CompanyIdentifier::forCompany($company, CompanyIdentifier::normalizeSiret($siret)))
+                ->setVatNumber(CompanyIdentifier::forCompany($company, CompanyIdentifier::normalizeVatNumber($vatNumber)))
                 ->setTitleId($titleId)
                 ->setFirstname($firstname)
                 ->setLastname($lastname)
@@ -123,10 +128,10 @@ class Customer extends BaseCustomer implements UserInterface, SecurityUserInterf
             $this->save($con);
 
             $con->commit();
-        } catch (PropelException $propelException) {
+        } catch (\Throwable $throwable) {
             $con->rollBack();
 
-            throw $propelException;
+            throw $throwable;
         }
     }
 
@@ -175,15 +180,7 @@ class Customer extends BaseCustomer implements UserInterface, SecurityUserInterf
      */
     public function getCustomerLang(): Lang
     {
-        $lang = $this->getLangModel();
-
-        if (null === $lang) {
-            $lang = (new LangQuery())
-                ->filterByByDefault(1)
-                ->findOne();
-        }
-
-        return $lang;
+        return $this->getLangModel() ?? Lang::getDefaultLanguage();
     }
 
     /**
@@ -265,6 +262,9 @@ class Customer extends BaseCustomer implements UserInterface, SecurityUserInterf
 
         if (null !== $password && '' !== trim($password)) {
             $this->setAlgo('PASSWORD_BCRYPT');
+
+            // A new password retires every remember-me cookie issued under the old one.
+            $this->setRememberMeToken(null);
 
             parent::setPassword(password_hash($password, \PASSWORD_BCRYPT));
         }
@@ -352,7 +352,7 @@ class Customer extends BaseCustomer implements UserInterface, SecurityUserInterf
      */
     public function getLocale(): string
     {
-        return $this->getLangModel()->getLocale();
+        return $this->getCustomerLang()->getLocale();
     }
 
     public function hasOrder()

@@ -14,9 +14,10 @@ declare(strict_types=1);
 
 namespace Thelia\Model;
 
+use Propel\Runtime\Collection\ObjectCollection;
 use Propel\Runtime\Connection\ConnectionInterface;
 use Propel\Runtime\Exception\PropelException;
-use Thelia\Domain\Taxation\TaxEngine\Calculator;
+use Thelia\Domain\Taxation\TaxEngine\TaxCalculatorResolverTrait;
 use Thelia\Model\Base\ProductSaleElements as BaseProductSaleElements;
 use Thelia\Model\Tools\PositionManagementTrait;
 use Thelia\Model\Tools\ProductPriceTools;
@@ -24,11 +25,12 @@ use Thelia\Model\Tools\ProductPriceTools;
 class ProductSaleElements extends BaseProductSaleElements
 {
     use PositionManagementTrait;
+    use TaxCalculatorResolverTrait;
 
     /**
      * @throws PropelException
      */
-    public function getPrice(string $virtualColumnName = 'price_PRICE', int $discount = 0): float
+    public function getPrice(string $virtualColumnName = 'price_PRICE', float $discount = 0.0): float
     {
         try {
             $amount = $this->getVirtualColumn($virtualColumnName);
@@ -46,7 +48,7 @@ class ProductSaleElements extends BaseProductSaleElements
     /**
      * @throws PropelException
      */
-    public function getPromoPrice(string $virtualColumnName = 'price_PROMO_PRICE', int $discount = 0): float
+    public function getPromoPrice(string $virtualColumnName = 'price_PROMO_PRICE', float $discount = 0.0): float
     {
         try {
             $amount = $this->getVirtualColumn($virtualColumnName);
@@ -64,21 +66,17 @@ class ProductSaleElements extends BaseProductSaleElements
     /**
      * @throws PropelException
      */
-    public function getTaxedPrice(Country $country, string $virtualColumnName = 'price_PRICE', int $discount = 0): float
+    public function getTaxedPrice(Country $country, string $virtualColumnName = 'price_PRICE', float $discount = 0.0): float
     {
-        $taxCalculator = new Calculator();
-
-        return $taxCalculator->load($this->getProduct(), $country)->getTaxedPrice($this->getPrice($virtualColumnName, $discount));
+        return $this->createTaxCalculator()->load($this->getProduct(), $country)->getTaxedPrice($this->getPrice($virtualColumnName, $discount));
     }
 
     /**
      * @throws PropelException
      */
-    public function getTaxedPromoPrice(Country $country, string $virtualColumnName = 'price_PROMO_PRICE', int $discount = 0): float
+    public function getTaxedPromoPrice(Country $country, string $virtualColumnName = 'price_PROMO_PRICE', float $discount = 0.0): float
     {
-        $taxCalculator = new Calculator();
-
-        return $taxCalculator->load($this->getProduct(), $country)->getTaxedPrice($this->getPromoPrice($virtualColumnName, $discount));
+        return $this->createTaxCalculator()->load($this->getProduct(), $country)->getTaxedPrice($this->getPromoPrice($virtualColumnName, $discount));
     }
 
     /**
@@ -92,7 +90,7 @@ class ProductSaleElements extends BaseProductSaleElements
      * @throws \RuntimeException
      * @throws PropelException
      */
-    public function getPricesByCurrency(Currency $currency, int $discount = 0): ProductPriceTools
+    public function getPricesByCurrency(Currency $currency, float $discount = 0.0): ProductPriceTools
     {
         $defaultCurrency = Currency::getDefaultCurrency();
 
@@ -125,6 +123,60 @@ class ProductSaleElements extends BaseProductSaleElements
         }
 
         return new ProductPriceTools((float) $price, (float) $promoPrice);
+    }
+
+    /**
+     * The documents a customer buying this sale element is entitled to download.
+     *
+     * @return ObjectCollection<ProductDocument>
+     */
+    public function getVirtualDocuments(): ObjectCollection
+    {
+        return ProductDocumentQuery::create()
+            ->useProductSaleElementsVirtualDocumentQuery()
+                ->filterByProductSaleElementsId($this->getId())
+                ->orderByPosition()
+            ->endUse()
+            ->find();
+    }
+
+    /**
+     * The single document a sale element currently holds.
+     */
+    public function getVirtualDocument(): ?ProductDocument
+    {
+        return ProductDocumentQuery::create()
+            ->useProductSaleElementsVirtualDocumentQuery()
+                ->filterByProductSaleElementsId($this->getId())
+                ->orderByPosition()
+            ->endUse()
+            ->findOne();
+    }
+
+    /**
+     * Set the document this sale element is downloaded from, or remove the association
+     * when given null.
+     *
+     * The table holds several rows per sale element so that offering more than one file
+     * stays a matter of allowing a second row. Until that product decision is taken, a
+     * sale element is downloaded from a single document, and this is where the rule is
+     * enforced.
+     */
+    public function setVirtualDocument(?int $documentId): void
+    {
+        ProductSaleElementsVirtualDocumentQuery::create()
+            ->filterByProductSaleElementsId($this->getId())
+            ->delete();
+
+        if (null === $documentId) {
+            return;
+        }
+
+        (new ProductSaleElementsVirtualDocument())
+            ->setProductSaleElementsId($this->getId())
+            ->setProductDocumentId($documentId)
+            ->setPosition(1)
+            ->save();
     }
 
     protected function addCriteriaToPositionQuery($query): void

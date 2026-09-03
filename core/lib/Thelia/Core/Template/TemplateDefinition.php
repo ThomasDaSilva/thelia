@@ -31,7 +31,10 @@ class TemplateDefinition
     public const FRONT_OFFICE_CONFIG_NAME = 'active-front-template';
     public const BACK_OFFICE_CONFIG_NAME = 'active-admin-template';
     public const PDF_CONFIG_NAME = 'active-pdf-template';
-    public const EMAIL_CONFIG_NAME = 'active-email-template';
+    // The email template has been stored under 'active-mail-template' since 2.0.0-beta2,
+    // and that is the name the seed writes and every reader looks up. Anything else here
+    // makes 'template:set email' write a variable no shop ever reads.
+    public const EMAIL_CONFIG_NAME = 'active-mail-template';
     public const CONFIG_NAMES = [
         self::FRONT_OFFICE_SUBDIR => self::FRONT_OFFICE_CONFIG_NAME,
         self::BACK_OFFICE_SUBDIR => self::BACK_OFFICE_CONFIG_NAME,
@@ -49,6 +52,9 @@ class TemplateDefinition
         self::EMAIL => self::EMAIL_SUBDIR,
     ];
     protected ?array $parentList = null;
+
+    /** @var list<string>|null */
+    protected ?array $internalViews = null;
 
     /**
      * @param string $name the template name (= directory name)
@@ -99,6 +105,36 @@ class TemplateDefinition
         }
 
         return $this->parentList;
+    }
+
+    /**
+     * The views this template declares as internal, i.e. rendered by a controller and not
+     * reachable on a URL made of their own name.
+     *
+     * The declaration is optional (see InternalViewsDeclaration): a template that ships no
+     * declaration keeps exposing all of its root templates. The nearest declaration wins —
+     * an inherited list only applies while the template declares nothing itself.
+     *
+     * @return list<string>
+     */
+    public function getInternalViews(): array
+    {
+        if (null !== $this->internalViews) {
+            return $this->internalViews;
+        }
+
+        $templateList = array_merge([$this], array_values($this->getParentList() ?? []));
+
+        /** @var self $templateDefinition */
+        foreach ($templateList as $templateDefinition) {
+            $declaredViews = InternalViewsDeclaration::readFrom($templateDefinition->getAbsolutePath());
+
+            if (null !== $declaredViews) {
+                return $this->internalViews = $declaredViews;
+            }
+        }
+
+        return $this->internalViews = [];
     }
 
     public function getTemplateFilePath(string $templateName): string

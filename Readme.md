@@ -1,5 +1,9 @@
 # Thelia
 
+[![tests](https://img.shields.io/github/actions/workflow/status/thelia/thelia/test.yml?branch=main&label=tests)](https://github.com/thelia/thelia/actions/workflows/test.yml) [![PHPStan](https://img.shields.io/github/actions/workflow/status/thelia/thelia/phpstan-botwig.yml?branch=main&label=PHPStan)](https://github.com/thelia/thelia/actions/workflows/phpstan-botwig.yml)
+[![stable](https://img.shields.io/packagist/v/thelia/thelia?label=stable)](https://packagist.org/packages/thelia/thelia) [![PHP](https://img.shields.io/badge/PHP-8.3-777BB4?logo=php&logoColor=white)](https://www.php.net/releases/8.3/en.php) [![Symfony](https://img.shields.io/badge/Symfony-7.4%20LTS-000000?logo=symfony&logoColor=white)](https://symfony.com/releases/7.4) [![API Platform](https://img.shields.io/badge/API%20Platform-4.3-38A9B4)](https://api-platform.com) [![license](https://img.shields.io/packagist/l/thelia/thelia)](LICENSE) [![docs](https://img.shields.io/badge/docs-doc.thelia.net-0A7BBB)](https://doc.thelia.net)
+[![stars](https://img.shields.io/github/stars/thelia/thelia?label=stars)](https://github.com/thelia/thelia/stargazers) [![contributors](https://img.shields.io/github/contributors/thelia/thelia)](https://github.com/thelia/thelia/graphs/contributors) [![last commit](https://img.shields.io/github/last-commit/thelia/thelia/main)](https://github.com/thelia/thelia/commits/main) [![code quality](https://img.shields.io/scrutinizer/quality/g/thelia/thelia/main?label=code%20quality)](https://scrutinizer-ci.com/g/thelia/thelia/)
+
 This is the development repository of Thelia, the open source e-commerce framework. Work on Thelia itself here.
 
 To create a shop, use the project skeleton instead: [thelia/thelia-project](https://github.com/thelia/thelia-project).
@@ -8,7 +12,7 @@ To create a shop, use the project skeleton instead: [thelia/thelia-project](http
 
 Thelia is an open source framework for building online stores and managing web content. Version 3 runs on:
 
-- PHP 8.3
+- PHP 8.3, 8.4 or 8.5
 - Symfony 7.4 LTS
 - API Platform 4.3 (standalone)
 - Propel ORM
@@ -21,11 +25,15 @@ Thelia is open source software. See the [LICENSE](LICENSE) file for details.
 
 ## Requirements
 
-- PHP 8.3 with these extensions: pdo_mysql, openssl, intl, gd, curl, dom, mbstring, zip
-- MariaDB 10.11 or MySQL 8
-- Composer 2.7+
-- Node.js 20 and npm, to build the front-office and back-office assets
-- Nginx or Apache, with the document root set to `public/`
+| Requirement | Supported |
+| --- | --- |
+| PHP | 8.3, 8.4 or 8.5 (8.3 recommended) |
+| Database | MariaDB 10.11 or later (recommended), or MySQL 8.x |
+| PHP extensions | pdo_mysql, openssl, intl, gd, curl, dom, mbstring, zip |
+| Composer | 2.7 or later |
+| Web server | Nginx or Apache, document root set to `public/` |
+
+How long each release series receives security fixes is listed in [SECURITY.md](SECURITY.md).
 
 ## Setting up a development environment
 
@@ -55,11 +63,12 @@ Without DDEV, export the database variables (or put them in `.env.local`) and ru
 
 ### Build the assets
 
-`bin/install` sets up the database and templates but does not compile front-end assets. Build them for each active template that has a `package.json`, otherwise the pages return HTTP 500 with a missing Webpack entrypoints file:
+`bin/install` compiles all the assets itself: it runs `importmap:install` and `tailwind:build` for the active front-office theme, and `sass:build` for the back-office stylesheet. To rebuild them later, run the same commands from the application root:
 
 ```bash
-ddev exec bash -c "cd templates/frontOffice/flexy && npm install && npm run build"
-ddev exec bash -c "cd templates/backOffice/default-twig && npm install && npm run build"
+ddev exec php bin/console importmap:install   # front-office JavaScript dependencies
+ddev exec php bin/console tailwind:build      # front-office stylesheet (Flexy)
+ddev exec php bin/console sass:build          # back-office stylesheet (default-twig)
 ```
 
 The storefront is then at `https://<project>.ddev.site` and the admin at `https://<project>.ddev.site/admin`.
@@ -72,7 +81,7 @@ Thelia 3 installs the Twig back office (`default-twig`) by default. The Smarty b
 ddev exec bin/console template:set backOffice default-twig   # or: default
 ```
 
-If you maintain a module, the migration guide is in `BREAKING_CHANGES.md` inside the default-twig template.
+If you maintain a module, the migration guide is at <https://doc.thelia.net/docs/upgrading/migrate>.
 
 ## Tests and quality
 

@@ -17,10 +17,8 @@ namespace Thelia\Domain\Taxation\TaxEngine;
 use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\HttpFoundation\Session\SessionInterface;
-use Thelia\Model\AddressQuery;
 use Thelia\Model\Cart;
 use Thelia\Model\Country;
-use Thelia\Model\CountryQuery;
 use Thelia\Model\Customer;
 use Thelia\Model\State;
 
@@ -53,7 +51,7 @@ class TaxEngine
         $currentDeliveryAddress = null;
 
         if ($cart) {
-            $currentDeliveryAddress = AddressQuery::create()->findPk($cart->getAddressDeliveryId());
+            $currentDeliveryAddress = $cart->getCartAddressRelatedByAddressDeliveryId();
         }
 
         if ($currentDeliveryAddress) {
@@ -67,7 +65,7 @@ class TaxEngine
         $customer = $this->getSession()?->getCustomerUser();
 
         if (!$customer) {
-            $this->taxCountry = CountryQuery::create()->findOneByByDefault(1);
+            $this->taxCountry = Country::getDefaultCountry();
             $this->taxState = null;
 
             return $this->taxCountry;
@@ -80,7 +78,7 @@ class TaxEngine
             return $this->taxCountry;
         }
 
-        $this->taxCountry = CountryQuery::create()->findOneByByDefault(1);
+        $this->taxCountry = Country::getDefaultCountry();
         $this->taxState = null;
 
         return $this->taxCountry;

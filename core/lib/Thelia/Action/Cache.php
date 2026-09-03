@@ -30,6 +30,14 @@ use Thelia\Core\Event\TheliaEvents;
  */
 class Cache extends BaseAction implements EventSubscriberInterface
 {
+    /**
+     * Removing the cache directory takes the compiled container's lazy service
+     * files with it, so any listener still waiting to be loaded from the
+     * container would fail to load. The deferred clear therefore runs after
+     * every other terminate listener.
+     */
+    private const TERMINATE_PRIORITY = \PHP_INT_MIN;
+
     /** @var CacheEvent[] */
     protected array $onTerminateCacheClearEvents = [];
 
@@ -54,6 +62,12 @@ class Cache extends BaseAction implements EventSubscriberInterface
 
         foreach ($this->onTerminateCacheClearEvents as $cacheEvent) {
             if ($cacheEvent->getDir() === $event->getDir()) {
+                // Events are deduplicated per directory, so the one that is kept must
+                // carry the schema invalidation as soon as any of them asks for it.
+                if ($event->invalidatesPropelSchema()) {
+                    $cacheEvent->setInvalidatePropelSchema(true);
+                }
+
                 $findDir = true;
                 break;
             }
@@ -75,10 +89,12 @@ class Cache extends BaseAction implements EventSubscriberInterface
     {
         $this->adapter->clear();
 
-        $dir = $event->getDir();
-
         $fs = new Filesystem();
-        $fs->remove($dir);
+        $fs->remove($event->getDir());
+
+        if (!$event->invalidatesPropelSchema()) {
+            return;
+        }
 
         // Invalidate the Propel combined schema so it is recombined on next boot
         // (picks up activated/deactivated modules). Models are only rebuilt if the
@@ -90,8 +106,8 @@ class Cache extends BaseAction implements EventSubscriberInterface
     {
         return [
             TheliaEvents::CACHE_CLEAR => ['cacheClear', 128],
-            KernelEvents::TERMINATE => ['onTerminate', 128],
-            ConsoleEvents::TERMINATE => ['onTerminate', 128],
+            KernelEvents::TERMINATE => ['onTerminate', self::TERMINATE_PRIORITY],
+            ConsoleEvents::TERMINATE => ['onTerminate', self::TERMINATE_PRIORITY],
         ];
     }
 }

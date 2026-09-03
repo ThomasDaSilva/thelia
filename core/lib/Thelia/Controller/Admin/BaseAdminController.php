@@ -23,9 +23,9 @@ use Thelia\Core\HttpFoundation\Session\Session;
 use Thelia\Core\HttpKernel\Exception\RedirectException;
 use Thelia\Core\Security\Exception\AuthenticationException;
 use Thelia\Core\Security\Exception\AuthorizationException;
+use Thelia\Core\Template\Exception\ResourceNotFoundException;
 use Thelia\Core\Template\ParserInterface;
 use Thelia\Core\Template\TemplateDefinition;
-use Thelia\Form\BaseForm;
 use Thelia\Log\Tlog;
 use Thelia\Model\AdminLog;
 use Thelia\Model\ConfigQuery;
@@ -54,6 +54,9 @@ class BaseAdminController extends BaseController
             if (null !== $view) {
                 return $this->render($view);
             }
+        } catch (ResourceNotFoundException) {
+            // The requested template does not exist: this is a 404, not a server error.
+            return $this->pageNotFound();
         } catch (\Exception $exception) {
             return $this->errorPage($exception->getMessage());
         }
@@ -137,32 +140,6 @@ class BaseAdminController extends BaseController
                 '%error' => $exception->getMessage(),
             ],
         );
-    }
-
-    protected function setupFormErrorContext(string $action, string $error_message, ?BaseForm $form = null, ?\Exception $exception = null): void
-    {
-        // Log the error message
-        Tlog::getInstance()->error(
-            $this->translator->trans(
-                'Error during %action process : %error. Exception was %exc',
-                [
-                    '%action' => $action,
-                    '%error' => $error_message,
-                    '%exc' => $exception instanceof \Exception ? $exception->getMessage() : 'no exception',
-                ],
-            ),
-        );
-
-        if ($form instanceof BaseForm) {
-            // Mark the form as errored
-            $form->setErrorMessage($error_message);
-
-            // Pass it to the parser context
-            $this->getParserContext()->addForm($form);
-        }
-
-        // Pass the error message to the parser.
-        $this->getParserContext()->setGeneralError($error_message);
     }
 
     /**

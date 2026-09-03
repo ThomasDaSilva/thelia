@@ -1,3 +1,239 @@
+# 3.0.0
+
+First stable release of Thelia 3. 56 commits since 3.0.0-beta5. The version number follows the update script this release ships, `setup/update/sql/3.0.0.sql`, which carries the lost password mail wording, the canonical mail template configuration row, and deactivates the module the default install no longer ships.
+
+## Security
+
+Two coordinated advisories are fixed and published with this release. Shops running a beta should update without waiting.
+
+- GHSA-v6v7-757c-2w5g — the front cart items API answered for any cart item id, whoever asked. Cart items are now scoped to the cart their caller owns, whether the caller is a logged-in customer or an anonymous session, and creating a cart no longer accepts a foreign owner.
+- GHSA-p2h2-2622-q773 — any authenticated back-office account reached every admin API resource. The admin API now enforces the per-resource permissions the back-office profiles define.
+- Coupons are no longer readable anonymously: `/api/front/coupons` requires an authenticated customer, so restricted coupon codes stay restricted.
+- The front API no longer lists the installed modules and their exact versions; `/api/front/modules` is gone, the admin endpoint is unchanged.
+- The cart token is assigned server-side. The body of `POST /api/front/carts` cannot choose it any more, which closes cart fixation; a headless client reads the token in the response instead of picking one.
+- The lost password mail sends a signed, single-use reset link. The shop never generates, stores or mails a new password on someone else's request, and the form no longer discloses whether an address has an account. #3840
+- The remember-me cookie carries `HttpOnly`, `Secure` and `SameSite`.
+
+## Breaking changes
+
+- The write group of the front cart API no longer contains the cart owner, its discount, or its token: those are set by the server. A front-office client that sent them must stop; readers are unaffected.
+- `/api/front/coupons` answers 401 for anonymous callers, and `/api/front/modules` no longer exists.
+- The constructor of `Thelia\Action\Customer` changed with the password reset rework. #3840
+- A shop configuration value has the last word over the core defaults again. A project that overrode `title`, `version` or `stateless` in its own `config/packages/api_platform.yaml` to compensate should remove those keys. #3860
+- Updating a Thelia 2 database in place is refused with an explicit message instead of silently replaying the 2.5 scripts; migrating from Thelia 2 is a separate, documented path. `UPDATE.md` now describes Thelia 3 in-place updates.
+- The `VirtualProductControl` module left the default install: it only ever shipped a Thelia 2 Smarty back-office hook. The update script deactivates it; the module row comes back if it is ever reinstalled on purpose.
+
+## Front office
+
+- The contact form linked in the footer submits: the core handles `POST /contact`, mails the store with the visitor address as reply-to, and answers on the page. #3838
+- A visitor who checks several sub-categories, several brands or several values of one feature widens the list instead of emptying it. #3867, #3829, #3828, #3830
+- The tfilters facets are counted from the products the visible filter keeps, and each feature and attribute facet reads in its own mode. #3830
+- Front sale elements are priced in the currency being browsed, not the shop default. #3835
+- Thelia forms can opt into stateless CSRF tokens, so a cached product page no longer rejects the first add-to-cart of a fresh visitor. Session tokens stay the default. #3825
+- A payment return reaches the checkout routes Thelia 3 declares instead of Thelia 2 route names. #3836
+- A parser rendering outside HTTP (mail from a command, PDF from a cron) reports no request instead of crashing. #3827
+
+## Performance
+
+- The API bridge stops paying for data the serializer discards, memoizes and batches the rewritten url lookups, and reads the config table, the default country and the active languages once per request; to-many relations of a collection load in one query each. The demo home went from about 1400 SQL queries to about 150. #3812, #3813, #3814, #3823, #3839, #3844
+- The resource addons aggregate in front of the serializer metadata cache, so `cache:warmup` no longer strips them from API responses. #3834
+
+## API
+
+- A write answers with the translation it saved, not the one it replaced. #3831
+- Thelia forms build from the injected form factory builder, so form extensions registered through `thelia.forms.extension` apply again. #3832
+- The api documentation page wears the Thelia colours, title and version. #3853
+
+## Back office
+
+- Submitting the admin login while a session is already open redirects to the requested page instead of erroring. #3822
+
+## Install and update
+
+- Environment overrides stay out of the shared config cache, and the first install run wires the themes it was given. #3859, #3852
+- The email template configuration lives under the single name every shop reads; the update script carries a value stored by a beta over. #3858
+- The install skips the Sass build when no active theme ships Sass sources. #3842
+- An order export totals an order once, whatever its number of tax and coupon rows, and totals the exported orders the way they were invoiced. #3848, #3843
+- The `nl_NL` language Thelia 2 shipped is seeded again, eight languages in all. #3851
+- PHP is required as `>= 8.3 < 9.0` everywhere the bound is checked, and the test suite runs on PHP 8.3, 8.4 and 8.5.
+
+## Project
+
+- `SECURITY.md` is a coordinated vulnerability disclosure policy with an incident response process, and every release ships a CycloneDX SBOM.
+- The yaml config and the twig themes are linted on every CI run, after the propel models are built.
+- The `thelia/config` and `thelia/setup` packages declare a description and a license, so `composer validate` passes on both.
+
+# 3.0.0-beta5
+
+8 commits since 3.0.0-beta4. The version number follows the update script this release ships, `setup/update/sql/3.0.0-beta5.sql`, which adds the legal identifier columns to the address, cart address and order address tables.
+
+## Orders and invoicing
+
+- The rounding rule an order is totalled with is configurable. `order_rounding_mode` keeps the historical unit-price rounding as the default, and a shop can opt into rounding the line totals instead. A console command switches the mode, reports how the figures of existing orders would move, and freezes the totals of the orders placed before the switch. The api exposes order unit amounts with the precision the order total uses. #3801
+- A business address carries the legal identifiers electronic invoicing asks for: a company registration number and a VAT number, entered on the address, copied to the cart address and frozen on the order address, next to the company name they identify. The format is checked only on a value that was actually typed, and is country-aware. Neither identifier is ever mandatory and existing rows stay NULL, so nothing is required retroactively. #3798, #3804
+
+## Front office
+
+- Checking several values of the same feature filter widens the product list instead of emptying it: the values of one feature are OR-ed together, distinct features still narrow the list. #3810
+- A rewritten url that spells out a path keeps its separators instead of losing them to the url sanitizer. A shop that wants flat urls can still forbid the slash through the configuration key. #3809
+- The front controllers point at the router service and the routes a Thelia 3 install registers, so their redirects resolve instead of failing when a visitor reaches them. #3802
+- A live component renders again: the Thelia view listener no longer claims the default render action of a component as an unknown view and answers 404 before the component is rendered. #3798
+
+## Emails
+
+- A mail message that has no template file renders the body stored in the database with the default parser, instead of being silently lost. #3803
+
+## Install
+
+- A fresh install of the development repository resolves again: the version of the `core/` path repository follows the release, and the bundle list no longer registers an asset bundle nothing installs. #3799
+
+# 3.0.0-beta4
+
+30 commits since 3.0.0-beta3. The version number follows the update script this release ships, `setup/update/sql/3.0.0-beta4.sql`. That script carries no database change: every fix of this cycle lives in code, and the file exists so that the updater finds a script matching the version marker instead of replaying the whole history.
+
+## Updating a shop
+
+- The update loop runs on the connection Propel hands out, and `setup/update.php` bootstraps on a thelia-project layout: updating an existing shop works again. #3769, #3770
+- The backup taken before an update restores, where NULL values used to be dumped as empty strings, and it is allowed when `memory_limit` is unlimited instead of being refused outright. #3778, #3792
+- An update run is reported for what it did instead of a phantom transaction error, the script aborts cleanly and exits non-zero when stdin gives no answer, and a missing backup file no longer breaks the run. #3776, #3768, #3759
+
+## Installing a shop
+
+- A fresh install serves its first page: `bin/install` creates `var/translations`, an AssetMapper path that `symfony/ux-translator` registers but never creates at boot. #3791
+- The back office stylesheet is built during install, now that the `default-twig` theme ships on AssetMapper with sass-bundle: no npm anywhere any more, Node.js is no longer a prerequisite. #3795
+- The `sql_mode` verdict cached during install is read from the server configuration, not from the session that computed it, so web requests get the session mode they need on MySQL, and `STRICT_TRANS_TABLES` stays in the session mode on both engines. #3793, #3782
+- `composer/installers` 2.x is accepted, and `thelia/setup` and `thelia/config` declare a branch alias so their development line resolves. #3781, #3790
+
+## Front office
+
+- An unknown front office path answers 404 instead of 500. #3762
+- A redirect lands on the domain of the requested language, and a rewritten url keeps its query parameters when it switches language. #3775, #3771
+- SVG images are served as they are instead of being handed to the raster image pipeline. #3761
+
+## Modules
+
+- The module refresh keeps going when one module raises a PHP error, and resolves the descriptor path of a module before the refresh can fail on it.
+- A generated module no longer ships a deprecated `routing.xml`. #3766
+
+## Console and internals
+
+- Deprecation logs stay out of the production error log. #3764
+- The three worst-rated legacy classes were split into smaller units, without a change of behaviour. #3759
+- Tests cover the virtual product download link and route, guard the core against deprecated `Request::get()` call sites, and assert the theme render instead of skipping it once the theme vendors are installed. #3763, #3765, #3756, #3757
+- The Readme documents the AssetMapper asset builds, front and back, and carries the build, release and stack badges. #3789, #3796, #3760
+
+# 3.0.0-beta3
+
+118 commits since 3.0.0-beta1. The version number follows the update script this release ships, `setup/update/sql/3.0.0-beta3.sql`, so that a fresh install does not read itself as out of date.
+
+## Themes
+
+- A theme declares in `config/views.yaml` the root templates that are views rendered by a controller, not pages. The file was read but its content was ignored, so every root template of a theme stayed reachable through a url made of its own name. A theme that ships no such file keeps the previous behaviour. #3617
+
+## Customer data
+
+- The core can anonymise an account and export the personal data it holds. It dispatches `CUSTOMER_ANONYMIZE` and `CUSTOMER_PERSONAL_DATA_EXPORT`, ships a console command for each, and a module adds its own sections to the export through a provider interface. #3588
+- An anonymised account is marked as such, and an order outlives the module it was paid or shipped with. #3692, #3713
+- The admin log no longer keeps the identity of a customer erased by an anonymisation. #3719
+- The form firewall records that kept ip addresses forever are purged. #3684
+
+## Store settings
+
+- The legal identifiers of the shop have one configuration key each, instead of a single free-text field, which is what electronic invoicing asks for. The former key is kept and still read. #3748
+
+## Shipping and taxes
+
+- Each delivery module can carry its own postage tax rule. #3664, #3700, #3727
+- The postage tax of a mixed cart is split between the rates the cart carries. #3721
+- `cart.postage` and `order.postage` now have the same meaning, and the postage estimate is read as the object it is. #3698, #3683
+- The tax calculator is replaceable through a factory service, and the tax discount helpers are replaceable, their static entry points deprecated. #3587, #3647
+- The customer discount rate is stored on the order and handled as the decimal it is. #3532, #3542
+- A cart discount is left untouched when nothing in the cart is taxable. #3612
+- The tax factor cache is indexed on the order or cart it was computed for. #3596
+
+## Virtual products
+
+- The virtual document of a sale element is stored in its own table, exposed on the api, carried when a product is cloned, and persisted on product update. #3720, #3687, #3691, #3550
+- A virtual download is reported only when the order has a virtual document. #3545
+- The virtual flags of an order product are exposed on the front order payload. #3677
+
+## Modules
+
+- A module is upgraded in place instead of being deleted and reinstalled, and stays activated when its upgrade is refused. #3699, #3671
+- Hooks are registered on install only, not on every module refresh, and a module can declare the position of its hooks. #3710, #3585
+- `hook:clean` keeps the hook positions and the ignored hooks. #3561
+- Deleting a module removes the exports and imports it leaves behind. #3670
+- The back office tells the admin to deactivate a module that an order still references. #3548
+
+## API
+
+- An item is named after the surface the request was served from. #3738
+- Upload constraints are published read-only on the file resources, the shop upload policy applies to api uploads, and the upload endpoints receive their parent item. #3643, #3637, #3636
+- The front address endpoints are usable and safe, a single customer title can be read, and the cart address fields answer with the cart address they point at. #3733, #3734, #3716
+- Address ownership is enforced on `GET /front/account/addresses/{id}`. #3448
+- The folder parent id is exposed instead of a boolean. #3618
+- `OrderProduct.virtualDocument` is typed as a string, and a null price is returned as null instead of being rounded. #3541, #3553
+
+## Security
+
+- Lost password requests and account activation code requests are rate limited, per address and per client. #3665, #3656
+- The activation code is mailed with a subject and a usable link on registration. #3672
+- An admin session is denied when the admin account was deleted. #3456
+- An upload policy applies to every file upload and is configurable per shop, and the declared import formats are enforced on the uploaded file. #3582, #3597
+
+## Install, update and seed
+
+- `setup/update.php` runs again on the Thelia 3 line, the update chain resumes from the closest known version, and the columns added after the 3.0.0-beta1 tag are migrated. #3579, #3500, #3566
+- The running version is written in the database on a fresh install, and the jwt key pair is generated by `bin/install`. #3577, #3576
+- `generate:sql` is runnable again and the seed is reproducible; the update script templates nothing renders were dropped. #3735, #3737
+- A fresh install serves its first page: `bin/install` builds the assets the active theme needs, and the bundle list no longer names a package nothing requires. #3749
+- The shipped translations are seeded when a language is added, and the seed sources use the Twig syntax the mailer renders. #3718, #3726
+- The seed carries the ISO 3166-1 countries that were missing, the French departments as states of France, the ISO 4217 numeric code on currencies, and the full ISO 3166-2 code as a computed field. Several outdated seed values were corrected. #3557, #3536, #3549, #3531, #3529, #3567, #3660, #3690, #3454
+- A country can carry states without requiring one, and the address forms no longer offer a hidden state. #3723, #3706
+- A random `APP_SECRET` is generated when none is set, and a missing one is detected from the env files.
+
+## Front office
+
+- A rewritten url is never redirected to itself when the language domain is missing or is the current one, and the current page is kept when switching to another language domain. #3630, #3506, #3504
+- The stored rewritten url is handed back, and the url of a deleted object answers 404. #3615
+- Rewritten urls are sanitized on insert. #3507
+- Invalid coupon codes are removed from the cart session, coupons are consumed when the payment is confirmed rather than when the order is created, and cart item prices and special offer status are refreshed when a cart is restored. #3499, #3525, #3526
+- `search_mode=any_word` supports multi-word searches in `search_in`. #3473
+- `Customer::getLocale()` no longer fatals when the account has no language. #3688
+
+## Emails
+
+- Customer emails are rendered in the customer language when they are sent from the back office. #3543
+- The parser template definition is restored when mail rendering fails. #3539
+
+## Errors and logging
+
+- Uncaught exceptions are logged before the error page stops event propagation. #3484
+- The transaction is rolled back when a non-Exception error escapes an action. #3613
+- An unknown back office template answers 404 instead of 500. #3573
+
+## Exports and imports
+
+- Every order is exported when no date range is given, and the command can supply one. #3650
+- Old export cache files are purged before each export. #3501
+- The columns an import expects are exposed so a csv template can be built. #3598
+- The shipping tax rule title is exported as text, and the delivery country in its own column. #3689
+
+## Performance
+
+- The tfilters facet values are aggregated in the database. #3653
+- The category child id cache is indexed on the depth it was walked with. #3611
+- The Propel schema is kept when a cache clear cannot have changed it. #3600
+
+## Console and internals
+
+- Console commands are registered with `addCommand()`, deferred cache clears run from the console, and Thelia's own cache command is reachable. #3638, #3620
+- The trusted proxy and host parameters are converted to what `Request` accepts. #3649
+- Declared public visibility is kept when the PSR-4 registration redefines a service, and the dead service declarations the Thelia prototype load overwrites were dropped. #3708, #3652
+- Thelia services stay reachable from the test container, and the http smoke suites fail on a broken page. #3639, #3666
+- The tracked env, bundles and phpunit files match what the recipes install. #3651
+- A custom order status can declare the canonical status it stands for. #3533
+
 # 3.0.0-beta1
 
 Thelia 3 is a major version. Main changes:

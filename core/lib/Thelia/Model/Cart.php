@@ -20,11 +20,13 @@ use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 use Thelia\Core\Event\Cart\CartDuplicationEvent;
 use Thelia\Core\Event\Cart\CartItemDuplicationItem;
 use Thelia\Core\Event\TheliaEvents;
-use Thelia\Domain\Taxation\TaxEngine\Calculator;
+use Thelia\Domain\Taxation\TaxEngine\TaxCalculatorResolverTrait;
 use Thelia\Model\Base\Cart as BaseCart;
 
 class Cart extends BaseCart
 {
+    use TaxCalculatorResolverTrait;
+
     /**
      * Duplicate the current existing cart. Only the token is changed.
      *
@@ -48,7 +50,7 @@ class Cart extends BaseCart
         $cart->setAddressInvoiceId($this->getAddressInvoiceId());
         $cart->setToken($token);
 
-        $discount = 0;
+        $discount = 0.0;
 
         if (!$currency instanceof Currency) {
             $currencyQuery = CurrencyQuery::create();
@@ -61,7 +63,8 @@ class Cart extends BaseCart
             $cart->setCustomer($customer);
 
             if ($customer->getDiscount() > 0) {
-                $discount = $customer->getDiscount();
+                // getDiscount() maps a DECIMAL column and returns a string.
+                $discount = (float) $customer->getDiscount();
             }
         }
 
@@ -177,7 +180,7 @@ class Cart extends BaseCart
         }
 
         if ($withPostage) {
-            $total += (float) $this->getPostage();
+            $total += $this->getUntaxedPostage();
         }
 
         return round($total, 2);
@@ -257,11 +260,27 @@ class Cart extends BaseCart
             return (float) $this->getDiscount();
         }
 
-        return round(Calculator::getUntaxedCartDiscount($this, $country, $state), 2);
+        return round($this->createTaxCalculator()->computeUntaxedCartDiscount($this, $country, $state), 2);
     }
 
+    /**
+     * Return the postage, tax included.
+     *
+     * The postage column is stored tax included, exactly like Order::getPostage(),
+     * so this method only spells the convention out for the caller.
+     */
     public function getTaxedPostage(): float
     {
-        return (float) $this->getPostage() + (float) $this->getPostageTax();
+        return (float) $this->getPostage();
+    }
+
+    /**
+     * Return the postage without tax.
+     */
+    public function getUntaxedPostage(): float
+    {
+        return 0 < (float) $this->getPostageTax()
+            ? (float) $this->getPostage() - (float) $this->getPostageTax()
+            : (float) $this->getPostage();
     }
 }

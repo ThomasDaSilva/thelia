@@ -53,6 +53,8 @@ readonly class PropelPersistProcessor implements ProcessorInterface
             $propelModel->setId($uriVariables['id']);
         }
 
+        $resourceAddons = [];
+
         $connection = Propel::getWriteConnection(DatabaseConfiguration::THELIA_CONNECTION_NAME);
         $connection->beginTransaction();
 
@@ -77,7 +79,7 @@ readonly class PropelPersistProcessor implements ProcessorInterface
             $propelModel->reload();
 
             $data->setId($propelModel->getId());
-        } catch (\Exception $exception) {
+        } catch (\Throwable $exception) {
             $connection->rollBack();
 
             throw $exception;
@@ -90,7 +92,13 @@ readonly class PropelPersistProcessor implements ProcessorInterface
             $data = $this->apiResourcePropelTransformerService->modelToResource(
                 resourceClass: $data::class,
                 propelModel: $propelModel,
-                context: $postOperation->getNormalizationContext(),
+                // The model instance is the one the provider read before the write,
+                // so its joined i18n columns still hold the replaced values. Only
+                // the translation getters know what was just saved.
+                context: [
+                    ...($postOperation->getNormalizationContext() ?? []),
+                    ApiResourcePropelTransformerService::STALE_I18N_VIRTUAL_COLUMNS => true,
+                ],
                 withAddon: false,
             );
 

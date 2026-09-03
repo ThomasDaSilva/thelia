@@ -188,16 +188,20 @@ class AttributeAccessService
         return '';
     }
 
+    /**
+     * Reads an attribute of the shop's default country: its title, its iso
+     * codes, any of its columns. The argument names that attribute, the way
+     * attributeCurrency() and attributeBrand() take one; it does not name the
+     * country, since the default one is the only country this reads.
+     */
     public function attributeCountry(string $attributeName): mixed
     {
-        if ($attributeName !== 'default') {
-            return '';
-        }
-
         return $this->dataAccessWithI18n(
             'defaultCountry',
             $attributeName,
-            CountryQuery::create()->filterByByDefault(1)->limit(1)
+            // Filtering by the already memoized default country's id, rather than
+            // by_default=1 again, skips a redundant lookup of which country that is.
+            CountryQuery::create()->filterById(Country::getDefaultCountry()->getId())->limit(1)
         );
     }
 
@@ -238,8 +242,14 @@ class AttributeAccessService
             case 'taxed_postage':
                 $result = $cart->getTaxedPostage();
                 break;
+            case 'untaxed_postage':
+                $result = $cart->getUntaxedPostage();
+                break;
             case 'postage':
                 $result = $cart->getPostage();
+                break;
+            case 'postage_tax':
+                $result = $cart->getPostageTax();
                 break;
             case 'total_price':
             case 'total_price_with_discount':

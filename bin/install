@@ -92,9 +92,11 @@ if (!preg_match('/^[a-zA-Z0-9_\-]+$/', $dbName)) {
 
 // ── Phase 1: Check permissions ───────────────────────────────────────
 
-// Ensure required directories exist (may be missing after a fresh clone)
+// Ensure required directories exist (may be missing after a fresh clone).
+// var/translations is registered as an AssetMapper path by symfony/ux-translator,
+// which never creates it at boot: without it, the first page answers 500.
 $fs = new Symfony\Component\Filesystem\Filesystem();
-foreach (['var', 'public', 'local/media', 'local/config'] as $dir) {
+foreach (['var', 'public', 'local/media', 'local/config', 'var/translations'] as $dir) {
     $fs->mkdir(THELIA_ROOT.$dir);
 }
 
@@ -200,8 +202,11 @@ $configMap = [
 ];
 
 foreach ($themes as $type => $name) {
-    if (isset($configMap[$type]) && '' !== trim($name)) {
-        $setup->setConfig($configMap[$type], trim($name));
+    $name = trim($name);
+
+    if (isset($configMap[$type]) && '' !== $name) {
+        $setup->setConfig($configMap[$type], $name);
+        publishConfigVariableForCurrentProcess($configMap[$type], $name);
     }
 }
 
@@ -251,6 +256,32 @@ foreach ($themes as $type => $name) {
 
 $commands = [];
 
+// The API login endpoints sign their tokens with the LexikJWTAuthenticationBundle
+// key pair. composer.json only generates it on post-install-cmd, so an install
+// whose composer step ran with --no-scripts, or ended on a "composer update"
+// (post-update-cmd only clears the cache), starts without keys and every call to
+// /api/admin/login answers 500. Generating the pair here makes bin/install
+// self-sufficient, whatever the composer flow was.
+$jwtPrivateKeyPath = resolveJwtKeyPath('JWT_SECRET_KEY', 'private.pem');
+$jwtPublicKeyPath = resolveJwtKeyPath('JWT_PUBLIC_KEY', 'public.pem');
+
+if (!is_file($jwtPrivateKeyPath) || !is_file($jwtPublicKeyPath)) {
+    // lexik:jwt:generate-keypair skips as soon as ONE of the two files exists, so
+    // --skip-if-exists would leave a half pair broken forever: an incomplete pair
+    // is overwritten instead. A lone private key signs tokens nobody can verify,
+    // there is nothing to preserve.
+    $isHalfKeyPair = is_file($jwtPrivateKeyPath) || is_file($jwtPublicKeyPath);
+
+    $commands[] = [
+        'label' => 'Generating JWT key pair',
+        'input' => [
+            'command' => 'lexik:jwt:generate-keypair',
+            ($isHalfKeyPair ? '--overwrite' : '--skip-if-exists') => true,
+            '--no-interaction' => true,
+        ],
+    ];
+}
+
 foreach ($themes as $type => $name) {
     $name = trim($name);
     if ('' !== $name) {
@@ -277,7 +308,15 @@ if (isset($options['with-demo'])) {
     ];
 }
 
+// Without --admin_password the account gets a password nobody can guess, printed once at
+// the end of the run: a shared default would be the first thing tried on every new shop.
+$generatedAdminPassword = null;
+
 if (isset($options['with-admin'])) {
+    if (!isset($options['admin_password']) || '' === $options['admin_password']) {
+        $generatedAdminPassword = rtrim(strtr(base64_encode(random_bytes(15)), '+/', '-_'), '=');
+    }
+
     $commands[] = [
         'label' => 'Creating admin user',
         'input' => [
@@ -286,8 +325,35 @@ if (isset($options['with-admin'])) {
             '--first_name' => $options['admin_first_name'] ?? 'Admin',
             '--last_name' => $options['admin_last_name'] ?? 'Thelia',
             '--email' => $options['admin_email'] ?? 'admin@thelia.net',
-            '--password' => $options['admin_password'] ?? 'thelia',
+            '--password' => $generatedAdminPassword ?? $options['admin_password'],
         ],
+    ];
+}
+
+// The assets a theme needs at runtime. A theme built on AssetMapper reads its
+// JavaScript from `assets/vendor`, one built on Tailwind reads a stylesheet that only
+// exists once built, and one built on Sass (the Twig back-office) reads a stylesheet
+// compiled by sass:build: without them, the first page of the shop or of the admin
+// answers 500. Each command comes from a package a theme may or may not require, so it
+// is skipped where nothing provides it. They run last: all read the themes that
+// template:set chose.
+foreach ([
+    'importmap:install' => 'Installing front-office asset dependencies',
+    'tailwind:build' => 'Building the front-office stylesheet',
+    'sass:build' => 'Building the Sass stylesheets',
+] as $command => $label) {
+    // sass:build compiles the entry files the active theme declares. When none of
+    // the selected themes ships Sass, symfonycasts/sass-bundle keeps its own
+    // default entry (assets/styles/app.scss), a file Thelia does not ship, and the
+    // build fails on a stylesheet nobody asked for.
+    if ('sass:build' === $command && !hasSassSourcesToBuild($themes)) {
+        continue;
+    }
+
+    $commands[] = [
+        'label' => $label,
+        'input' => ['command' => $command],
+        'optional' => true,
     ];
 }
 
@@ -308,13 +374,20 @@ set_error_handler(static function (int $errno, string $errstr) {
 }, \E_WARNING);
 
 foreach ($commands as $cmd) {
-    echo "  {$cmd['label']}\n";
-
     $kernel = new $kernelClass($_SERVER['APP_ENV'] ?? 'dev', false);
     $kernel->boot();
 
     $app = new Symfony\Bundle\FrameworkBundle\Console\Application($kernel);
     $app->setAutoExit(false);
+
+    // An optional command belongs to a package the active theme may not require.
+    if (($cmd['optional'] ?? false) && !$app->has($cmd['input']['command'])) {
+        $kernel->shutdown();
+
+        continue;
+    }
+
+    echo "  {$cmd['label']}\n";
 
     try {
         $exitCode = $app->run(new Symfony\Component\Console\Input\ArrayInput($cmd['input']), $output);
@@ -340,6 +413,11 @@ foreach ($commands as $cmd) {
 
 restore_error_handler();
 
+if (!is_file($jwtPrivateKeyPath) || !is_file($jwtPublicKeyPath)) {
+    fwrite(STDERR, "  ERROR: JWT key pair missing ({$jwtPrivateKeyPath}, {$jwtPublicKeyPath}): the API login endpoints would answer 500. Run \"php bin/console lexik:jwt:generate-keypair --overwrite\".\n");
+    ++$errors;
+}
+
 // ── Result ───────────────────────────────────────────────────────────
 
 if ($errors > 0) {
@@ -349,7 +427,91 @@ if ($errors > 0) {
 
 echo "\nThelia installed successfully.\n";
 
+if (null !== $generatedAdminPassword) {
+    echo "\nAdministrator '".($options['admin_login'] ?? 'thelia')."' created with the password: {$generatedAdminPassword}\n";
+    echo "Write it down now, it is not stored anywhere else. Change it after the first login.\n";
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Resolve a JWT key file path from the environment, without booting the kernel.
+ *
+ * The dotenv values hold the %kernel.project_dir% placeholder, which only the
+ * container resolves, hence the manual substitution.
+ */
+function resolveJwtKeyPath(string $envName, string $defaultFileName): string
+{
+    $path = (string) ($_SERVER[$envName] ?? '');
+
+    if ('' === $path) {
+        $path = '%kernel.project_dir%/config/jwt/'.$defaultFileName;
+    }
+
+    return str_replace('%kernel.project_dir%/', THELIA_ROOT, $path);
+}
+
+/**
+ * Publish a Thelia configuration variable as an environment variable of the running process.
+ *
+ * Thelia\Model\Config lets an environment variable take precedence over the stored value, and
+ * the template packages declare their own theme that way in .env. The kernel booted below would
+ * otherwise run the rest of the install — module post-activation, demo import — on the theme a
+ * recipe declares rather than the one being installed: template:set writes the choice to
+ * .env.local, a file the dotenv loader has already read by then.
+ *
+ * The variable name is the one Thelia\Model\Config::getEnvName() derives from the config name.
+ */
+function publishConfigVariableForCurrentProcess(string $configName, string $value): void
+{
+    $envName = str_replace(['.', '-'], '_', strtoupper($configName));
+
+    $_SERVER[$envName] = $value;
+    $_ENV[$envName] = $value;
+    putenv($envName.'='.$value);
+}
+
+/**
+ * Whether one of the selected themes, or the project itself, ships a Sass entry file.
+ *
+ * A theme built on Sass registers its own entry file with symfonycasts/sass-bundle,
+ * but only while it is the active one: on any run where another theme is selected,
+ * the bundle falls back to its default entry and the build fails on a file that does
+ * not exist. Partials (a leading underscore) are compile-time inputs, never entries.
+ *
+ * @param array<string, string> $selectedThemes
+ */
+function hasSassSourcesToBuild(array $selectedThemes): bool
+{
+    $searchDirectories = [THELIA_ROOT.'assets'];
+
+    foreach ($selectedThemes as $type => $name) {
+        $name = trim($name);
+
+        if ('' !== $name) {
+            $searchDirectories[] = THELIA_TEMPLATE_DIR.$type.DS.$name.DS.'assets';
+        }
+    }
+
+    foreach ($searchDirectories as $directory) {
+        if (!is_dir($directory)) {
+            continue;
+        }
+
+        $finder = (new Symfony\Component\Finder\Finder())
+            ->files()
+            ->in($directory)
+            ->exclude(['vendor', 'node_modules'])
+            ->name('*.scss')
+            ->notName('_*');
+
+        if ($finder->hasResults()) {
+            return true;
+        }
+    }
+
+    return false;
+}
 
 /**
  * Drop bundles whose template is shipped with another package than the one selected.

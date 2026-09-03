@@ -25,6 +25,7 @@ use Propel\Runtime\Map\TableMap;
 use Symfony\Component\Serializer\Annotation\Groups;
 use Thelia\Api\Bridge\Propel\Attribute\Relation;
 use Thelia\Api\Controller\Front\CartController;
+use Thelia\Api\State\Processor\CartCreationProcessor;
 use Thelia\Model\Map\CartTableMap;
 
 #[ApiResource(
@@ -56,6 +57,7 @@ use Thelia\Model\Map\CartTableMap;
     operations: [
         new Post(
             uriTemplate: '/front/carts',
+            processor: CartCreationProcessor::class,
         ),
         new Get(
             uriTemplate: '/front/carts/{id}',
@@ -93,20 +95,26 @@ class Cart implements PropelResourceInterface
     #[Groups([self::GROUP_ADMIN_READ, CartItem::GROUP_ADMIN_READ, Order::GROUP_ADMIN_READ_SINGLE, self::GROUP_FRONT_READ])]
     public ?int $id = null;
 
-    #[Groups([self::GROUP_ADMIN_READ, self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_READ, self::GROUP_FRONT_WRITE])]
+    // Not writable from the front: the token is a bearer secret used to restore
+    // an anonymous cart from its cookie. Letting the body choose it opens cart
+    // fixation, so it is always generated server-side (Cart::preInsert).
+    #[Groups([self::GROUP_ADMIN_READ, self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_READ])]
     public ?string $token = null;
 
+    // Not writable from the front: POST /front/carts is anonymous, so a body
+    // that names its owner would let anyone file a cart under any account.
+    // The cart is bound to its customer server-side, at login.
     #[Relation(targetResource: Customer::class)]
-    #[Groups([self::GROUP_ADMIN_READ, self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_READ, self::GROUP_FRONT_WRITE])]
+    #[Groups([self::GROUP_ADMIN_READ, self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_READ])]
     public ?Customer $customer = null;
 
-    #[Relation(targetResource: Address::class, relationAlias: 'AddressRelatedByAddressDeliveryId')]
+    #[Relation(targetResource: CartAddress::class, relationAlias: 'CartAddressRelatedByAddressDeliveryId')]
     #[Groups([self::GROUP_ADMIN_READ, self::GROUP_FRONT_READ])]
-    public ?Address $addressDelivery = null;
+    public ?CartAddress $addressDelivery = null;
 
-    #[Relation(targetResource: Address::class, relationAlias: 'AddressRelatedByAddressInvoiceId')]
+    #[Relation(targetResource: CartAddress::class, relationAlias: 'CartAddressRelatedByAddressInvoiceId')]
     #[Groups([self::GROUP_ADMIN_READ, self::GROUP_FRONT_READ])]
-    public ?Address $addressInvoice = null;
+    public ?CartAddress $addressInvoice = null;
 
     #[Relation(targetResource: Currency::class)]
     #[Groups([self::GROUP_ADMIN_READ, self::GROUP_FRONT_READ])]
@@ -116,7 +124,9 @@ class Cart implements PropelResourceInterface
     #[Groups([self::GROUP_ADMIN_READ, Order::GROUP_ADMIN_READ, self::GROUP_FRONT_READ])]
     public ?array $cartItems = [];
 
-    #[Groups([self::GROUP_ADMIN_READ, self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_READ, self::GROUP_FRONT_WRITE])]
+    // Not writable from the front either: the discount is subtracted from the
+    // cart total, and it is derived from the customer's own rate.
+    #[Groups([self::GROUP_ADMIN_READ, self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_READ])]
     public ?float $discount = null;
 
     #[Groups([self::GROUP_ADMIN_READ_SINGLE, self::GROUP_FRONT_READ_SINGLE])]
@@ -179,24 +189,24 @@ class Cart implements PropelResourceInterface
         return $this;
     }
 
-    public function getAddressDelivery(): ?Address
+    public function getAddressDelivery(): ?CartAddress
     {
         return $this->addressDelivery;
     }
 
-    public function setAddressDelivery(?Address $addressDelivery): self
+    public function setAddressDelivery(?CartAddress $addressDelivery): self
     {
         $this->addressDelivery = $addressDelivery;
 
         return $this;
     }
 
-    public function getAddressInvoice(): ?Address
+    public function getAddressInvoice(): ?CartAddress
     {
         return $this->addressInvoice;
     }
 
-    public function setAddressInvoice(?Address $addressInvoice): self
+    public function setAddressInvoice(?CartAddress $addressInvoice): self
     {
         $this->addressInvoice = $addressInvoice;
 

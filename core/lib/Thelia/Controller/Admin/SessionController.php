@@ -83,7 +83,7 @@ class SessionController extends BaseAdminController
             return $response;
         }
 
-        return $this->render('login');
+        return $this->renderLoginPage();
     }
 
     public function showLostPasswordAction(): Response|RedirectResponse
@@ -225,6 +225,15 @@ class SessionController extends BaseAdminController
     {
         $eventDispatcher->dispatch(new DefaultActionEvent(), TheliaEvents::ADMIN_LOGOUT);
 
+        // The remember-me cookie is checked against the token stored on the account: the
+        // browser drops its copy below, the account forgets the token here, so a copy kept
+        // elsewhere stops working too.
+        $admin = $this->getSecurityContext()->getAdminUser();
+
+        if ($admin instanceof Admin) {
+            $admin->setRememberMeToken(null)->save();
+        }
+
         $this->getSecurityContext()->clearAdminUser();
 
         // Clear the remember me cookie, if any
@@ -237,6 +246,13 @@ class SessionController extends BaseAdminController
 
     public function checkLoginAction(EventDispatcherInterface $eventDispatcher): RedirectResponse|Response|null
     {
+        // A login form submitted while a session is already open (browser back
+        // button, second tab) carries a stale CSRF token and would always be
+        // rejected: go straight to the home page instead.
+        if (($response = $this->checkAdminLoggedIn()) instanceof RedirectResponse) {
+            return $response;
+        }
+
         $request = $this->getRequest();
 
         /** @var AdminLogin $adminLoginForm */
@@ -302,7 +318,19 @@ class SessionController extends BaseAdminController
         $this->setupFormErrorContext('Login process', $message, $adminLoginForm, $ex);
 
         // Display the login form again
-        return $this->render('login');
+        return $this->renderLoginPage();
+    }
+
+    protected function renderLoginPage(): Response
+    {
+        $response = $this->render('login');
+
+        // Keep the login form out of the browser back-forward cache: once
+        // logged in, navigating back must fetch the page again and be
+        // redirected to the home page, not restore a stale form.
+        $response->headers->set('Cache-Control', 'no-store');
+
+        return $response;
     }
 
     /**

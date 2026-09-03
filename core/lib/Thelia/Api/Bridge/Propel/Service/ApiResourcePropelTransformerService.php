@@ -14,6 +14,8 @@ declare(strict_types=1);
 
 namespace Thelia\Api\Bridge\Propel\Service;
 
+use ApiPlatform\Metadata\Get;
+use ApiPlatform\Metadata\GetCollection;
 use ApiPlatform\Metadata\Operation;
 use ApiPlatform\Metadata\Patch;
 use ApiPlatform\Metadata\Put;
@@ -33,10 +35,17 @@ use Thelia\Api\Bridge\Propel\Event\ModelToResourceEvent;
 use Thelia\Api\Resource\PropelResourceInterface;
 use Thelia\Api\Resource\ResourceAddonInterface;
 use Thelia\Api\Resource\TranslatableResourceInterface;
-use Thelia\Model\LangQuery;
+use Thelia\Model\Lang;
 
 readonly class ApiResourcePropelTransformerService
 {
+    /**
+     * Context flag telling the transformer that the model instance it reads
+     * carries i18n columns joined before a write, so they hold the values that
+     * write replaced. Set it on a write response, never on a read.
+     */
+    public const STALE_I18N_VIRTUAL_COLUMNS = 'thelia_stale_i18n_virtual_columns';
+
     public function __construct(
         private array $apiResourceAddons,
         private ValidatorInterface $validator,
@@ -65,7 +74,7 @@ readonly class ApiResourcePropelTransformerService
         bool $withAddon = true,
     ): PropelResourceInterface {
         if (!$langs instanceof Collection) {
-            $langs = LangQuery::create()->filterByActive(1)->find();
+            $langs = Lang::getActiveLangs();
         }
 
         // Init internal recursion-control context
@@ -77,7 +86,7 @@ readonly class ApiResourcePropelTransformerService
 
         $baseModel ??= $propelModel;
 
-        $modelToResourceEvent = new ModelToResourceEvent($baseModel, $parentModel);
+        $modelToResourceEvent = new ModelToResourceEvent($baseModel, $parentModel, $context);
         $this->eventDispatcher->dispatch($modelToResourceEvent, ModelToResourceEvent::BEFORE_TRANSFORM);
         $baseModel = $modelToResourceEvent->getModel();
 
@@ -127,12 +136,23 @@ readonly class ApiResourcePropelTransformerService
 
         if ($withAddon) {
             foreach ($this->getResourceAddonDefinitions($resourceClass) as $addonShortName => $addonClass) {
-                if (is_subclass_of($addonClass, ResourceAddonInterface::class)) {
-                    $addon = (new $addonClass())
-                        ->setContext($context)
-                        ->buildFromModel($propelModel, $apiResource);
-                    $apiResource->setResourceAddon($addonShortName, $addon);
+                if (!is_subclass_of($addonClass, ResourceAddonInterface::class)) {
+                    continue;
                 }
+
+                /** @var ResourceAddonInterface $addon */
+                $addon = (new $addonClass())->setContext($context);
+
+                // An addon resolves its own rows, and the serializer returns it only
+                // when one of its properties belongs to the current groups. Building
+                // it out of them bought a query per row for a payload that never
+                // mentions the addon. It is still attached, so nothing reading it
+                // through the resource finds a hole where the addon used to be.
+                if ($this->hasPropertyInGroups($addonClass, $context)) {
+                    $addon = $addon->buildFromModel($propelModel, $apiResource);
+                }
+
+                $apiResource->setResourceAddon($addonShortName, $addon);
             }
         }
 
@@ -204,6 +224,17 @@ readonly class ApiResourcePropelTransformerService
     /**
      * @throws \ReflectionException
      */
+    /**
+     * The Propel getter a resource property reads its value from. A property
+     * may rename it, either as a column or as a relation alias.
+     */
+    public function resolvePropelGetterName(\ReflectionProperty $property): string
+    {
+        $propelGetter = $this->determinePropelGetterName($property, Column::class, 'propelFieldName', 'get'.ucfirst($property->getName()));
+
+        return $this->determinePropelGetterName($property, Relation::class, 'relationAlias', $propelGetter);
+    }
+
     public function getColumnValues(\ReflectionClass $reflector, array $columns): array
     {
         $columnValues = [];
@@ -523,20 +554,10 @@ readonly class ApiResourcePropelTransformerService
         Collection $langs,
     ): void {
         foreach ($reflector->getProperties() as $property) {
-            if (
-                !$this->checkGroupsSerialization(property: $property, context: $context)
-                && $this->isGroupsExcluded(property: $property, context: $context)
-            ) {
-                // This condition prevents circular references during resource serialization,
-                // avoiding infinite recursion. To make this work, you need to use the
-                // `excludedGroups` attribute on the related resource (e.g.:
-                // #[Relation(targetResource: SelectionContainer::class, excludedGroups: [SelectionContainer::GROUP_READ])])
-                // to exclude problematic serialization groups and break the circular dependency.
+            if (!$this->shouldHydrateRelation(property: $property, reflector: $reflector, context: $context)) {
                 continue;
             }
-            $defaultGetter = 'get'.ucfirst($property->getName());
-            $propelGetter = $this->determinePropelGetterName($property, Column::class, 'propelFieldName', $defaultGetter);
-            $propelGetter = $this->determinePropelGetterName($property, Relation::class, 'relationAlias', $propelGetter);
+            $propelGetter = $this->resolvePropelGetterName($property);
 
             if (!method_exists($propelModel, $propelGetter)) {
                 continue;
@@ -548,10 +569,20 @@ readonly class ApiResourcePropelTransformerService
                 continue;
             }
 
+            $relationAttributes = $property->getAttributes(Relation::class);
+
+            // The recursion guard prunes this branch, so nothing reads what the
+            // getter would return. Asking for it first fetched the relation rows
+            // to throw them away, once per back reference of every nested
+            // resource of a collection.
+            if ([] !== $relationAttributes && !$withRelation) {
+                continue;
+            }
+
             $value = $propelModel->{$propelGetter}();
 
-            foreach ($property->getAttributes(Relation::class) as $relationAttribute) {
-                if (!$withRelation || null === $value) {
+            foreach ($relationAttributes as $relationAttribute) {
+                if (null === $value) {
                     continue 2;
                 }
 
@@ -671,6 +702,8 @@ readonly class ApiResourcePropelTransformerService
         array $context,
         Collection $langs,
     ): void {
+        $staleVirtualColumns = (bool) ($context[self::STALE_I18N_VIRTUAL_COLUMNS] ?? false);
+
         foreach ($langs as $lang) {
             $i18nResource = new ($resourceClass::getI18nResourceClass());
 
@@ -693,11 +726,13 @@ readonly class ApiResourcePropelTransformerService
 
                 $virtualColumn = ltrim(strtolower($parentReflector?->getShortName().'_'.$reflector->getShortName()).'_lang_'.$lang->getLocale().'_'.$i18nFieldName, '_');
 
-                if ($baseModel->hasVirtualColumn($virtualColumn)) {
+                if (!$staleVirtualColumns && $baseModel->hasVirtualColumn($virtualColumn)) {
+                    // The query left-joined every active language, so an empty column
+                    // is an answer: that language has no translation. Reading it as
+                    // "not loaded yet" sent one query per row and per language after a
+                    // row that is not there.
                     $fieldValue = $baseModel->getVirtualColumn($virtualColumn);
-                }
-
-                if (null === $fieldValue) {
+                } else {
                     $propelModel->setlocale($lang->getLocale());
                     $getter = 'get'.ucfirst($i18nFieldName);
 
@@ -795,6 +830,82 @@ readonly class ApiResourcePropelTransformerService
                 $query->{$filterMethod}($value);
             }
         }
+    }
+
+    /**
+     * Reading a relation costs a query, and the serializer only ever returns the
+     * properties of the current groups: walking the others buys rows nobody
+     * looks at. A front product collection paid one read of attribute_combination
+     * per sale element for a payload that names none.
+     *
+     * `excludedGroups` still cuts a relation the groups do select, which is how a
+     * circular reference between two resources is broken. `hydrateOutOfGroups`
+     * does the opposite for the rare relation a resource computes one of its own
+     * fields from.
+     *
+     * Properties that are not relations are left alone: they cost nothing to read
+     * and some of them are set for reasons the groups do not describe.
+     */
+    /**
+     * Whether the current context reads a relation at all. Public because the
+     * preloader has to select exactly the relations this transformer will walk:
+     * reading one it then skips would put back the queries #3812 removed.
+     */
+    public function shouldHydrateRelation(\ReflectionProperty $property, \ReflectionClass $reflector, array $context): bool
+    {
+        $relationAttribute = $property->getAttributes(Relation::class, \ReflectionAttribute::IS_INSTANCEOF)[0] ?? null;
+
+        if (null === $relationAttribute || !isset($context['groups'])) {
+            return true;
+        }
+
+        if (true === ($relationAttribute->getArguments()['hydrateOutOfGroups'] ?? false)) {
+            return true;
+        }
+
+        // A write reads the resource to validate it, and its validation groups are
+        // not the groups of the response it answers with: the state provider has to
+        // hand over the whole resource. Only a read can be trimmed to what it returns.
+        $operation = $context['operation'] ?? null;
+
+        if ($operation instanceof Operation && !$operation instanceof Get && !$operation instanceof GetCollection) {
+            return true;
+        }
+
+        // A resource identified by its relations builds its own IRI out of them,
+        // so they are read whatever the groups return.
+        if (\in_array(
+            $property->getName(),
+            $this->getResourceCompositeIdentifierValues(reflector: $reflector, param: 'keys'),
+            true,
+        )) {
+            return true;
+        }
+
+        return $this->checkGroupsSerialization(property: $property, context: $context)
+            && !$this->isGroupsExcluded(property: $property, context: $context);
+    }
+
+    /**
+     * Mirrors what the serializer keeps of an addon: its attribute carries the
+     * groups of all of its own properties (see ClassMetaDataFactory), so it is
+     * returned as soon as one of them is in the context.
+     *
+     * @param class-string $class
+     */
+    private function hasPropertyInGroups(string $class, array $context): bool
+    {
+        if (!isset($context['groups'])) {
+            return true;
+        }
+
+        foreach ((new \ReflectionClass($class))->getProperties() as $property) {
+            if ($this->checkGroupsSerialization(property: $property, context: $context)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function checkGroupsSerialization(\ReflectionProperty $property, array $context): bool

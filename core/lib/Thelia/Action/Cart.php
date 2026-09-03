@@ -32,10 +32,12 @@ use Thelia\Core\HttpFoundation\Session\Session;
 use Thelia\Core\Security\SecurityContext;
 use Thelia\Domain\Cart\Exception\NotEnoughStockException;
 use Thelia\Domain\Cart\Service\CartAddressService;
+use Thelia\Domain\Shipping\Service\PostageTaxBreakdownCalculator;
 use Thelia\Model\AddressQuery;
 use Thelia\Model\Base\CustomerQuery;
 use Thelia\Model\Base\ProductSaleElementsQuery;
 use Thelia\Model\Cart as CartModel;
+use Thelia\Model\CartAddressQuery;
 use Thelia\Model\CartItem;
 use Thelia\Model\CartItemQuery;
 use Thelia\Model\CartQuery;
@@ -64,6 +66,7 @@ class Cart extends BaseAction implements EventSubscriberInterface
         protected SecurityContext $securityContext,
         protected ContainerInterface $container,
         protected CartAddressService $cartAddressService,
+        protected PostageTaxBreakdownCalculator $postageTaxBreakdownCalculator,
     ) {
     }
 
@@ -134,7 +137,10 @@ class Cart extends BaseAction implements EventSubscriberInterface
     {
         $cart = $event->getCart();
         $moduleId = $event->getDeliveryModuleId();
-        $deliveryAddressId = $event->getDeliveryAddressId();
+        // Postage is quoted on the address the cart ships to, which is the cart's
+        // own copy in `cart_address`. Reading it off the cart also covers an
+        // address typed in at checkout and never saved to the customer account.
+        $deliveryAddressId = $cart->getAddressDeliveryId();
 
         if (null === $moduleId || null === $deliveryAddressId) {
             return;
@@ -143,7 +149,7 @@ class Cart extends BaseAction implements EventSubscriberInterface
         try {
             $postage = $this->getPostageByDeliveryModuleId($cart, $dispatcher, $moduleId, $deliveryAddressId);
             $cart
-                ->setPostage((string) ($postage->getAmount() - $postage->getAmountTax()))
+                ->setPostage((string) $postage->getAmount())
                 ->setPostageTax((string) ($postage->getAmountTax() ?? 0.0))
                 ->setPostageTaxRuleTitle($postage->getTaxRuleTitle())
                 ->save();
@@ -223,7 +229,7 @@ class Cart extends BaseAction implements EventSubscriberInterface
         $quantity = $event->getQuantity();
         $currency = $cart->getCurrency();
         $customer = $cart->getCustomer();
-        $discount = 0;
+        $discount = 0.0;
 
         if ($cart->isNew()) {
             $persistEvent = new CartPersistEvent($cart);
@@ -231,11 +237,26 @@ class Cart extends BaseAction implements EventSubscriberInterface
         }
 
         if (null !== $customer && $customer->getDiscount() > 0) {
-            $discount = $customer->getDiscount();
+            // getDiscount() maps a DECIMAL column and returns a string.
+            $discount = (float) $customer->getDiscount();
         }
 
-        $productSaleElementsId = $event->getProductSaleElementsId();
-        $productId = $event->getProductId();
+        if (null === $quantity || $quantity <= 0) {
+            throw new \InvalidArgumentException('The quantity to add to the cart must be positive');
+        }
+
+        $productSaleElements = ProductSaleElementsQuery::create()->findPk($event->getProductSaleElementsId());
+
+        if (null === $productSaleElements) {
+            $event->setCartItem(null);
+
+            return;
+        }
+
+        // The line describes one sale element; the product it belongs to follows from it,
+        // whatever the request said, so the line, its price and its tax rule agree.
+        $productId = $productSaleElements->getProductId();
+        $event->setProductId($productId);
 
         // Search for an identical item in the cart
         $findItemEvent = clone $event;
@@ -246,16 +267,12 @@ class Cart extends BaseAction implements EventSubscriberInterface
         if ($cartItem instanceof CartItem && $append) {
             $cartItem->addQuantity($quantity)->save();
         } else {
-            $productSaleElements = ProductSaleElementsQuery::create()->findPk($productSaleElementsId);
+            $productPrices = $productSaleElements->getPricesByCurrency(
+                $currency ?? CurrencyModel::getDefaultCurrency(),
+                $discount,
+            );
 
-            if (null !== $productSaleElements) {
-                $productPrices = $productSaleElements->getPricesByCurrency(
-                    $currency ?? CurrencyModel::getDefaultCurrency(),
-                    $discount,
-                );
-
-                $cartItem = $this->doAddItem($dispatcher, $cart, $productId, $productSaleElements, $quantity, $productPrices);
-            }
+            $cartItem = $this->doAddItem($dispatcher, $cart, $productId, $productSaleElements, $quantity, $productPrices);
         }
 
         $event->setCartItem($cartItem);
@@ -328,29 +345,50 @@ class Cart extends BaseAction implements EventSubscriberInterface
      */
     public function updateCartPrices(CartModel $cart, CurrencyModel $currency): void
     {
+        $this->refreshCartItemPrices($cart, $currency);
+
+        // update the currency cart
+        $cart->setCurrencyId($currency->getId());
+        $cart->save();
+    }
+
+    /**
+     * Update the price, the promo price and the special offer status of the items of a cart, so that
+     * they always reflect the current catalog prices, in the given currency.
+     */
+    protected function refreshCartItemPrices(CartModel $cart, CurrencyModel $currency): void
+    {
         $customer = $cart->getCustomer();
-        $discount = 0;
+        $discount = 0.0;
 
         if (null !== $customer && $customer->getDiscount() > 0) {
-            $discount = $customer->getDiscount();
+            // getDiscount() maps a DECIMAL column and returns a string.
+            $discount = (float) $customer->getDiscount();
         }
 
         // cart item
         foreach ($cart->getCartItems() as $cartItem) {
             $productSaleElements = $cartItem->getProductSaleElements();
 
+            if (null === $productSaleElements) {
+                continue;
+            }
+
             $productPrice = $productSaleElements->getPricesByCurrency($currency, $discount);
+
+            // Nothing changed in the catalog, leave this item alone.
+            if ((float) $cartItem->getPrice() === (float) $productPrice->getPrice()
+                && (float) $cartItem->getPromoPrice() === (float) $productPrice->getPromoPrice()
+                && (int) $cartItem->getPromo() === (int) $productSaleElements->getPromo()) {
+                continue;
+            }
 
             $cartItem
                 ->setPrice((string) $productPrice->getPrice())
-                ->setPromoPrice((string) $productPrice->getPromoPrice());
-
-            $cartItem->save();
+                ->setPromoPrice((string) $productPrice->getPromoPrice())
+                ->setPromo($productSaleElements->getPromo())
+                ->save();
         }
-
-        // update the currency cart
-        $cart->setCurrencyId($currency->getId());
-        $cart->save();
     }
 
     /**
@@ -458,6 +496,12 @@ class Cart extends BaseAction implements EventSubscriberInterface
             $this->getSession()->setCurrency($cart->getCurrency());
         }
 
+        // A restored cart may have been created a long time ago: bring the price and the special offer
+        // status of its items back in line with the current catalog.
+        if (!$cart->isNew()) {
+            $this->refreshCartItemPrices($cart, $cart->getCurrency() ?: $this->getSession()->getCurrency(true));
+        }
+
         $cartRestoreEvent->setCart($cart);
     }
 
@@ -532,7 +576,8 @@ class Cart extends BaseAction implements EventSubscriberInterface
             // A customer is logged in.
             // If the customer has a discount, whe have to duplicate the cart,
             // so that the discount will be applied to the products in cart.
-            if (null === $cart->getCustomerId() && (0 === $customer->getDiscount() || 0 === $cart->countCartItems())) {
+            // getDiscount() maps a DECIMAL column, so it returns a string such as '0.000000'.
+            if (null === $cart->getCustomerId() && (0.0 === (float) $customer->getDiscount() || 0 === $cart->countCartItems())) {
                 // If no discount, or an empty cart, there's no need to duplicate.
                 $duplicateCart = false;
             }
@@ -559,6 +604,8 @@ class Cart extends BaseAction implements EventSubscriberInterface
     }
 
     /**
+     * @param int $deliveryAddressId id of the cart's delivery address, in `cart_address`
+     *
      * @throws PropelException
      */
     protected function getPostageByDeliveryModuleId(
@@ -567,7 +614,7 @@ class Cart extends BaseAction implements EventSubscriberInterface
         int $moduleId,
         int $deliveryAddressId,
     ): OrderPostage {
-        if (!$customer = $this->securityContext->getCustomerUser()) {
+        if (!$this->securityContext->getCustomerUser()) {
             throw new \Exception('Customer not found !');
         }
 
@@ -579,16 +626,9 @@ class Cart extends BaseAction implements EventSubscriberInterface
 
         $moduleInstance = $deliveryModule->getDeliveryModuleInstance($this->container);
 
-        $deliveryAddress = AddressQuery::create()
-            ->useCustomerQuery()
-            ->filterById($customer->getId())
-            ->endUse()
-            ->useCartAddressQuery()
-                ->filterById($deliveryAddressId)
-            ->endUse()
-            ->findOne();
+        $cartAddress = CartAddressQuery::create()->findPk($deliveryAddressId);
 
-        if (!$deliveryAddress) {
+        if (!$cartAddress) {
             throw new \Exception('Delivery address not found !');
         }
 
@@ -596,8 +636,12 @@ class Cart extends BaseAction implements EventSubscriberInterface
             throw new \Exception('Virtual product delivery failed ! ');
         }
 
-        $country = $deliveryAddress->getCountry();
-        $state = $deliveryAddress->getState();
+        $country = $cartAddress->getCountry();
+        $state = $cartAddress->getState();
+
+        // Delivery modules receive the customer address when the cart address was
+        // copied from one; country and state come from the cart address either way.
+        $deliveryAddress = $cartAddress->getAddress();
 
         $deliveryPostageEvent = new DeliveryPostageEvent($moduleInstance, $cart, $deliveryAddress, $country, $state);
 
@@ -606,11 +650,25 @@ class Cart extends BaseAction implements EventSubscriberInterface
             TheliaEvents::MODULE_DELIVERY_GET_POSTAGE
         );
 
-        if ($deliveryPostageEvent->getPostage()) {
-            return $deliveryPostageEvent->getPostage();
+        // A module that does not serve this cart quotes nothing, which is not the
+        // same as quoting a free delivery.
+        if (!$deliveryPostageEvent->isValidModule()) {
+            throw new DeliveryException(\sprintf('Delivery module %s is not available for this cart', $deliveryModule->getCode()));
         }
 
-        return new OrderPostage();
+        $postage = $deliveryPostageEvent->getPostage();
+
+        if (!$postage instanceof OrderPostage) {
+            return new OrderPostage();
+        }
+
+        // The delivery module quotes a postage under a single tax rule; whether
+        // that tax follows the goods instead is a shop decision, and the cart is
+        // only known here. Doing it on the way out keeps buildOrderPostage()'s
+        // signature intact, so no delivery module has to change.
+        $this->postageTaxBreakdownCalculator->applyToPostage($postage, $cart, $country, $state);
+
+        return $postage;
     }
 
     protected function dispatchNewCart(EventDispatcherInterface $dispatcher): CartModel

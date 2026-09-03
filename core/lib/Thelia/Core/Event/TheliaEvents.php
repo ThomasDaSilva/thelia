@@ -131,8 +131,20 @@ final class TheliaEvents
     /** sent on customer removal. */
     public const CUSTOMER_DELETEACCOUNT = 'action.deleteCustomer';
 
-    /** sent when a customer need a new password. */
+    /**
+     * Sent to erase the identifying data of a customer while keeping the
+     * accounting record of the orders, which cannot be deleted.
+     */
+    public const CUSTOMER_ANONYMIZE = 'action.anonymizeCustomer';
+
+    /** Sent to collect everything the shop knows about one customer. */
+    public const CUSTOMER_PERSONAL_DATA_EXPORT = 'action.exportCustomerPersonalData';
+
+    /** Sent when a customer asks to be mailed a link to choose a new password. */
     public const LOST_PASSWORD = 'action.lostPassword';
+
+    /** Sent when a customer comes back with a password reset link and a new password. */
+    public const CUSTOMER_RESET_PASSWORD = 'action.customer.resetPassword';
 
     /** Send the account ccreation confirmation email. */
     public const SEND_ACCOUNT_CONFIRMATION_EMAIL = 'action.customer.sendAccountConfirmationEmail';
@@ -387,6 +399,14 @@ final class TheliaEvents
     public const TAX_DELETE = 'action.deleteTax';
     public const TAX_GET_TYPE_SERVICE = 'action.getTaxService';
 
+    /**
+     * Sent by a call site with no container to obtain a tax calculator.
+     * Listen to it to substitute your own implementation.
+     *
+     * @see Tax\TaxCalculatorEvent
+     */
+    public const TAX_GET_CALCULATOR = 'action.getTaxCalculator';
+
     // -- Profile management ---------------------------------------------
 
     public const PROFILE_CREATE = 'action.createProfile';
@@ -434,8 +454,8 @@ final class TheliaEvents
     public const ATTRIBUTE_UPDATE = 'action.updateAttribute';
     public const ATTRIBUTE_DELETE = 'action.deleteAttribute';
     public const ATTRIBUTE_UPDATE_POSITION = 'action.updateAttributePosition';
-    public const ATTRIBUTE_REMOVE_FROM_ALL_TEMPLATES = 'action.addAttributeToAllTemplate';
-    public const ATTRIBUTE_ADD_TO_ALL_TEMPLATES = 'action.removeAttributeFromAllTemplate';
+    public const ATTRIBUTE_REMOVE_FROM_ALL_TEMPLATES = 'action.removeAttributeFromAllTemplate';
+    public const ATTRIBUTE_ADD_TO_ALL_TEMPLATES = 'action.addAttributeToAllTemplate';
 
     // -- Features management ---------------------------------------------
 
@@ -443,8 +463,8 @@ final class TheliaEvents
     public const FEATURE_UPDATE = 'action.updateFeature';
     public const FEATURE_DELETE = 'action.deleteFeature';
     public const FEATURE_UPDATE_POSITION = 'action.updateFeaturePosition';
-    public const FEATURE_REMOVE_FROM_ALL_TEMPLATES = 'action.addFeatureToAllTemplate';
-    public const FEATURE_ADD_TO_ALL_TEMPLATES = 'action.removeFeatureFromAllTemplate';
+    public const FEATURE_REMOVE_FROM_ALL_TEMPLATES = 'action.removeFeatureFromAllTemplate';
+    public const FEATURE_ADD_TO_ALL_TEMPLATES = 'action.addFeatureToAllTemplate';
 
     // -- Attributes values management ----------------------------------------
 

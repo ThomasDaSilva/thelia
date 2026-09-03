@@ -23,7 +23,31 @@ readonly class CustomerCodeManager
 {
     public function __construct(
         private MailerFactory $mailerFactory,
+        private CustomerEmailRequestLimiter $emailRequestLimiter,
     ) {
+    }
+
+    /**
+     * Send a fresh activation code, unless codes have already been asked for too often.
+     *
+     * This is the entry point for "send me the code again": it is reachable by anyone
+     * who knows an address, so the number of emails it can trigger has to be capped.
+     * Callers must answer the visitor the same way whether this returned true or false,
+     * otherwise the answer tells the caller whether the address has an account.
+     *
+     * @throws PropelException
+     */
+    public function requestCode(
+        Customer $customer,
+        int $expiryTimeInHours = 24,
+    ): bool {
+        if (!$this->emailRequestLimiter->allows((string) $customer->getEmail())) {
+            return false;
+        }
+
+        $this->createCodeAndSendIt($customer, $expiryTimeInHours);
+
+        return true;
     }
 
     /**

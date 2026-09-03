@@ -33,9 +33,21 @@ trait CreatesTestFiles
         $tmpFile = tempnam(sys_get_temp_dir(), $prefix);
         $img = imagecreatetruecolor(1, 1);
         imagepng($img, $tmpFile);
-        imagedestroy($img);
 
         return $tmpFile;
+    }
+
+    protected function createTestSvg(string $prefix = 'thelia_test_svg_'): string
+    {
+        $path = sys_get_temp_dir().\DIRECTORY_SEPARATOR.uniqid($prefix).'.svg';
+        file_put_contents(
+            $path,
+            '<?xml version="1.0" encoding="utf-8"?>'
+            .'<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40">'
+            .'<rect width="120" height="40" fill="#000000"/></svg>',
+        );
+
+        return $path;
     }
 
     protected function createTestTextFile(string $content = 'test content', string $prefix = 'thelia_test_doc_'): string

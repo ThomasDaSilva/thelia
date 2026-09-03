@@ -22,6 +22,7 @@ use Symfony\Component\DependencyInjection\Definition;
 use Symfony\Component\DependencyInjection\Reference;
 use Thelia\Core\Hook\BaseHook;
 use Thelia\Core\Hook\HookDefinition;
+use Thelia\Core\Hook\ModuleHookConfigurationStore;
 use Thelia\Core\Template\TemplateDefinition;
 use Thelia\Log\Tlog;
 use Thelia\Model\Base\IgnoredModuleHookQuery;
@@ -131,6 +132,9 @@ class RegisterHookListenersPass implements CompilerPassInterface
 
         // now we can add listeners for active hooks and active module
         $this->addHooksMethodCall($container, $definition);
+
+        // the hooks saved by hook:clean have been recreated, the saved configuration is not needed anymore
+        ModuleHookConfigurationStore::discard();
     }
 
     /**
@@ -146,6 +150,7 @@ class RegisterHookListenersPass implements CompilerPassInterface
         $type = $this->getHookType($attributes['type'] ?? TemplateDefinition::FRONT_OFFICE);
         $templates = (string) ($attributes['templates'] ?? '');
         $method = $this->getMethodName($attributes)['method'];
+        $declaredPosition = $this->getDeclaredPosition($attributes, $class);
 
         $hook = $this->getHook($attributes['event'], $type);
 
@@ -173,15 +178,18 @@ class RegisterHookListenersPass implements CompilerPassInterface
             }
 
             if (!IgnoredModuleHookQuery::create()->filterByHook($hook)->filterByModuleId($module->getId())->exists()) {
+                // restore the configuration saved by hook:clean, if this hook was one of the deleted ones
+                $savedConfiguration = ModuleHookConfigurationStore::find($module->getId(), $hook->getId(), $method);
+
                 (new ModuleHook())
                     ->setHook($hook)
                     ->setModuleId($module->getId())
                     ->setClassname($id)
                     ->setMethod($method)
-                    ->setActive($active)
+                    ->setActive($savedConfiguration['active'] ?? $active)
                     ->setHookActive(true)
                     ->setModuleActive(true)
-                    ->setPosition(ModuleHook::MAX_POSITION)
+                    ->setPosition($savedConfiguration['position'] ?? $declaredPosition ?? ModuleHook::MAX_POSITION)
                     ->setTemplates($templates)
                     ->save();
             }
@@ -196,6 +204,33 @@ class RegisterHookListenersPass implements CompilerPassInterface
         } elseif ($moduleHook->getClassname() !== $id) {
             $moduleHook->setClassname($id)->save();
         }
+    }
+
+    /**
+     * A module may declare the position it wants for one of its hooks. The value is read only when the
+     * module_hook row is created: once the row exists, the position belongs to the back office and the
+     * declaration must not overwrite it.
+     */
+    protected function getDeclaredPosition(array $attributes, string $class): ?int
+    {
+        if (!isset($attributes['position']) || '' === $attributes['position']) {
+            return null;
+        }
+
+        $position = (int) $attributes['position'];
+
+        if ($position < 1 || $position >= ModuleHook::MAX_POSITION) {
+            $this->logAlertMessage(\sprintf(
+                'Hook class [%s] declares position [%s], which is out of the allowed range [1, %d]. The hook is appended at the end of the queue instead.',
+                $class,
+                $attributes['position'],
+                ModuleHook::MAX_POSITION - 1,
+            ));
+
+            return null;
+        }
+
+        return $position;
     }
 
     protected function addHooksMethodCall(ContainerBuilder $container, Definition $definition): void

@@ -32,7 +32,10 @@ use Thelia\Api\Bridge\Propel\Attribute\Relation;
 use Thelia\Api\Bridge\Propel\Filter\BooleanFilter;
 use Thelia\Api\Bridge\Propel\Filter\NotInFilter;
 use Thelia\Api\Bridge\Propel\Filter\SearchFilter;
+use Thelia\Api\State\Processor\CustomerAddressProcessor;
 use Thelia\Core\Translation\Translator;
+use Thelia\Domain\Legal\CompanyIdentifier;
+use Thelia\Domain\Legal\CompanyIdentifierRules;
 use Thelia\Model\Map\AddressTableMap;
 
 #[ApiResource(
@@ -66,6 +69,7 @@ use Thelia\Model\Map\AddressTableMap;
         new Post(
             uriTemplate: '/front/account/addresses',
             normalizationContext: ['groups' => [self::GROUP_FRONT_READ, self::GROUP_FRONT_READ_SINGLE]],
+            processor: CustomerAddressProcessor::class,
         ),
         new GetCollection(
             uriTemplate: '/front/account/addresses',
@@ -73,11 +77,12 @@ use Thelia\Model\Map\AddressTableMap;
         new Get(
             uriTemplate: '/front/account/addresses/{id}',
             normalizationContext: ['groups' => [self::GROUP_FRONT_READ, self::GROUP_FRONT_READ_SINGLE]],
-            // security: 'object.customer.getId() == user.getId()'
+            security: 'object.customer.getId() == user.getId()',
         ),
         new Put(
             uriTemplate: '/front/account/addresses/{id}',
             security: 'object.customer.getId() == user.getId()',
+            processor: CustomerAddressProcessor::class,
         ),
         new Delete(
             uriTemplate: '/front/account/addresses/{id}',
@@ -134,38 +139,47 @@ class Address implements PropelResourceInterface
         self::GROUP_FRONT_READ,
         Customer::GROUP_ADMIN_READ_SINGLE,
         Cart::GROUP_ADMIN_READ_SINGLE,
+        Cart::GROUP_FRONT_READ_SINGLE,
         Customer::GROUP_ADMIN_WRITE_UPDATE,
     ])]
     public ?int $id = null;
 
     #[Groups([...self::GROUP_ADMIN_COMBINED, ...self::GROUP_FRONT_COMBINED])]
-    #[NotBlank(groups: [self::GROUP_ADMIN_WRITE, Customer::GROUP_ADMIN_WRITE])]
+    #[NotBlank(groups: [self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_WRITE, Customer::GROUP_ADMIN_WRITE])]
     public string $label;
 
     #[Groups([...self::GROUP_ADMIN_COMBINED, ...self::GROUP_FRONT_COMBINED, Cart::GROUP_ADMIN_READ_SINGLE, Cart::GROUP_FRONT_READ_SINGLE])]
-    #[NotBlank(groups: [self::GROUP_ADMIN_WRITE, Customer::GROUP_ADMIN_WRITE])]
+    #[NotBlank(groups: [self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_WRITE, Customer::GROUP_ADMIN_WRITE])]
     public string $firstname;
 
     #[Groups([...self::GROUP_ADMIN_COMBINED, ...self::GROUP_FRONT_COMBINED, Cart::GROUP_ADMIN_READ_SINGLE, Cart::GROUP_FRONT_READ_SINGLE])]
-    #[NotBlank(groups: [self::GROUP_ADMIN_WRITE, Customer::GROUP_ADMIN_WRITE])]
+    #[NotBlank(groups: [self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_WRITE, Customer::GROUP_ADMIN_WRITE])]
     public string $lastname;
 
     #[Groups([...self::GROUP_ADMIN_COMBINED, ...self::GROUP_FRONT_COMBINED])]
-    #[NotBlank(groups: [self::GROUP_ADMIN_WRITE, Customer::GROUP_ADMIN_WRITE])]
+    #[NotBlank(groups: [self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_WRITE, Customer::GROUP_ADMIN_WRITE])]
     public string $address1;
 
+    // The column is not nullable and has no default: left uninitialized, it is
+    // skipped by the transformer and the insert fails on the database side.
     #[Groups([...self::GROUP_ADMIN_COMBINED, ...self::GROUP_FRONT_COMBINED])]
-    public string $address2;
+    public string $address2 = '';
 
     #[Groups([...self::GROUP_ADMIN_COMBINED, ...self::GROUP_FRONT_COMBINED])]
-    public string $address3;
+    public string $address3 = '';
 
     #[Groups([...self::GROUP_ADMIN_COMBINED, ...self::GROUP_FRONT_COMBINED])]
-    #[NotBlank(groups: [self::GROUP_ADMIN_WRITE, Customer::GROUP_ADMIN_WRITE])]
+    #[NotBlank(groups: [self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_WRITE, Customer::GROUP_ADMIN_WRITE])]
     public string $zipcode;
 
     #[Groups([...self::GROUP_ADMIN_COMBINED, ...self::GROUP_FRONT_COMBINED])]
     public ?string $company = null;
+
+    #[Groups([...self::GROUP_ADMIN_COMBINED, ...self::GROUP_FRONT_COMBINED])]
+    public ?string $siret = null;
+
+    #[Groups([...self::GROUP_ADMIN_COMBINED, ...self::GROUP_FRONT_COMBINED])]
+    public ?string $vatNumber = null;
 
     #[Groups([...self::GROUP_ADMIN_COMBINED, ...self::GROUP_FRONT_COMBINED])]
     public ?string $cellphone = null;
@@ -174,7 +188,7 @@ class Address implements PropelResourceInterface
     public ?string $phone = null;
 
     #[Groups([...self::GROUP_ADMIN_COMBINED, ...self::GROUP_FRONT_COMBINED])]
-    #[NotBlank(groups: [self::GROUP_ADMIN_WRITE, Customer::GROUP_ADMIN_WRITE])]
+    #[NotBlank(groups: [self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_WRITE, Customer::GROUP_ADMIN_WRITE])]
     public ?string $city = null;
 
     #[Groups([...self::GROUP_ADMIN_COMBINED, ...self::GROUP_FRONT_COMBINED])]
@@ -188,19 +202,24 @@ class Address implements PropelResourceInterface
 
     #[Relation(targetResource: Country::class)]
     #[Groups([...self::GROUP_ADMIN_COMBINED, ...self::GROUP_FRONT_COMBINED])]
-    #[NotBlank(groups: [self::GROUP_ADMIN_WRITE, Customer::GROUP_ADMIN_WRITE])]
+    #[NotBlank(groups: [self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_WRITE, Customer::GROUP_ADMIN_WRITE])]
     public Country $country;
 
     #[Relation(targetResource: State::class)]
     #[Groups([...self::GROUP_ADMIN_COMBINED, ...self::GROUP_FRONT_COMBINED])]
     public ?State $state = null;
 
-    #[Relation(targetResource: Customer::class)]
-    #[Groups(groups: [self::GROUP_ADMIN_READ, self::GROUP_ADMIN_READ_SINGLE, self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_WRITE])]
+    // The front never sets the owner: CustomerAddressProcessor takes it from
+    // the token, so an account endpoint cannot write into another address book.
+    // hydrateOutOfGroups: the account endpoints check `object.customer` before
+    // answering, and no front group returns the owner.
+    #[Relation(targetResource: Customer::class, hydrateOutOfGroups: true)]
+    #[Groups(groups: [self::GROUP_ADMIN_READ, self::GROUP_ADMIN_READ_SINGLE, self::GROUP_ADMIN_WRITE])]
     public Customer $customer;
 
     #[Relation(targetResource: CustomerTitle::class)]
     #[Groups(groups: [self::GROUP_ADMIN_READ, self::GROUP_ADMIN_WRITE, Customer::GROUP_ADMIN_WRITE, self::GROUP_FRONT_READ, self::GROUP_FRONT_WRITE])]
+    #[NotBlank(groups: [self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_WRITE, Customer::GROUP_ADMIN_WRITE])]
     #[Column(propelSetter: 'setTitleId')]
     public CustomerTitle $customerTitle;
 
@@ -308,6 +327,33 @@ class Address implements PropelResourceInterface
     public function setCompany(?string $company): self
     {
         $this->company = $company;
+
+        return $this;
+    }
+
+    // Normalized when read rather than when written: the deserializer sets the properties in
+    // whatever order the payload lists them, so `company` is only reliably known once the
+    // whole resource has been populated.
+    public function getSiret(): ?string
+    {
+        return CompanyIdentifier::forCompany($this->company, CompanyIdentifier::normalizeSiret($this->siret));
+    }
+
+    public function setSiret(?string $siret): self
+    {
+        $this->siret = $siret;
+
+        return $this;
+    }
+
+    public function getVatNumber(): ?string
+    {
+        return CompanyIdentifier::forCompany($this->company, CompanyIdentifier::normalizeVatNumber($this->vatNumber));
+    }
+
+    public function setVatNumber(?string $vatNumber): self
+    {
+        $this->vatNumber = $vatNumber;
 
         return $this;
     }
@@ -437,7 +483,34 @@ class Address implements PropelResourceInterface
         return new AddressTableMap();
     }
 
-    #[Callback(groups: [self::GROUP_ADMIN_WRITE, Customer::GROUP_ADMIN_WRITE])]
+    /**
+     * Same rules as the address forms, from the same place: both identifiers are required as
+     * soon as a company name is given, and the checks narrow with the country of the address.
+     */
+    // GROUP_FRONT_WRITE included on purpose: /api/front/account/addresses writes the same
+    // table as the address form, and would otherwise accept what the form refuses.
+    #[Callback(groups: [self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_WRITE, Customer::GROUP_ADMIN_WRITE])]
+    public function verifyLegalIdentifiers(ExecutionContextInterface $context): void
+    {
+        /** @var self $resource */
+        $resource = $context->getRoot();
+
+        $violations = CompanyIdentifierRules::violationsFor(
+            $resource->company,
+            $resource->siret,
+            $resource->vatNumber,
+            isset($resource->country) ? $resource->getCountry()?->getPropelModel()?->getIsoalpha2() : null,
+        );
+
+        foreach ($violations as $violation) {
+            $context
+                ->buildViolation(Translator::getInstance()->trans($violation->message, $violation->parameters, null, 'en_US'))
+                ->atPath($violation->field)
+                ->addViolation();
+        }
+    }
+
+    #[Callback(groups: [self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_WRITE, Customer::GROUP_ADMIN_WRITE])]
     public function verifyZipcode(ExecutionContextInterface $context): void
     {
         $resource = $context->getRoot();
@@ -458,33 +531,45 @@ class Address implements PropelResourceInterface
         }
     }
 
-    #[Callback(groups: [self::GROUP_ADMIN_WRITE, Customer::GROUP_ADMIN_WRITE])]
+    #[Callback(groups: [self::GROUP_ADMIN_WRITE, self::GROUP_FRONT_WRITE, Customer::GROUP_ADMIN_WRITE])]
     public function verifyState(ExecutionContextInterface $context): void
     {
         $resource = $context->getRoot();
 
-        if (isset($resource->country) && null !== ($country = $resource->getCountry()->getPropelModel()) && $country->getHasStates()) {
-            if (null !== $state = $resource->getState()->getPropelModel()) {
-                if ($state->getCountryId() !== $country->getId()) {
-                    $context->addViolation(
-                        Translator::getInstance()->trans(
-                            "This state doesn't belong to this country.",
-                            [],
-                            null,
-                            'en_US',
-                        ),
-                    );
-                }
-            } else {
+        if (!isset($resource->country) || null === $country = $resource->getCountry()?->getPropelModel()) {
+            return;
+        }
+
+        $state = $resource->getState()?->getPropelModel();
+
+        // A state stays tied to its country whether or not the country requires one:
+        // an optional department must not be kept when the address moves elsewhere.
+        if (null !== $state) {
+            if ($state->getCountryId() !== $country->getId()) {
                 $context->addViolation(
                     Translator::getInstance()->trans(
-                        'You should select a state for this country.',
+                        "This state doesn't belong to this country.",
                         [],
                         null,
                         'en_US',
                     ),
                 );
             }
+
+            return;
+        }
+
+        // Requiring a state from a country that carries none would reject every address
+        // with an error the caller cannot act on.
+        if ($country->getHasStates() && $country->hasSelectableStates()) {
+            $context->addViolation(
+                Translator::getInstance()->trans(
+                    'You should select a state for this country.',
+                    [],
+                    null,
+                    'en_US',
+                ),
+            );
         }
     }
 }

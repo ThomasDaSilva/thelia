@@ -28,7 +28,6 @@ use ApiPlatform\OpenApi\Model\Response;
 use Propel\Runtime\Map\TableMap;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\Serializer\Annotation\Groups;
-use Symfony\Component\Validator\Constraints as Assert;
 use Thelia\Api\Bridge\Propel\Attribute\Relation;
 use Thelia\Api\Bridge\Propel\Filter\BooleanFilter;
 use Thelia\Api\Bridge\Propel\Filter\OrderFilter;
@@ -142,17 +141,6 @@ class BrandImage extends AbstractTranslatableResource implements ItemFileResourc
         openapiContext: [
             'type' => 'string',
             'format' => 'binary',
-        ],
-    )]
-    #[Assert\Image(
-        mimeTypes: [
-            'image/bmp',
-            'image/gif',
-            'image/jpeg',
-            'image/png',
-            'image/vnd.wap.wbmp',
-            'image/webp',
-            'image/xbm',
         ],
     )]
     public UploadedFile $fileToUpload;
@@ -289,6 +277,27 @@ class BrandImage extends AbstractTranslatableResource implements ItemFileResourc
     public static function getI18nResourceClass(): string
     {
         return BrandImageI18n::class;
+    }
+
+    /**
+     * What this shop accepts on an upload, so that a client can build its form
+     * without restating the lists. Read only: the constraints belong to the shop
+     * configuration, not to the file.
+     */
+    #[Groups([self::GROUP_ADMIN_READ_SINGLE])]
+    #[ApiProperty(
+        openapiContext: [
+            'type' => 'object',
+            'properties' => [
+                'allowedMimeTypes' => ['type' => 'array', 'items' => ['type' => 'string']],
+                'allowedExtensions' => ['type' => 'array', 'items' => ['type' => 'string']],
+                'forbiddenExtensions' => ['type' => 'array', 'items' => ['type' => 'string']],
+            ],
+        ],
+    )]
+    public function getUploadConstraints(): array
+    {
+        return FileUploadConstraints::forFileType(self::getFileType());
     }
 
     public static function getItemType(): string

@@ -72,6 +72,7 @@ use Thelia\Core\Template\Parser\ParserResolver;
 use Thelia\Core\Template\TemplateDefinition;
 use Thelia\Core\Template\TemplateHelperInterface;
 use Thelia\Core\Translation\Translator;
+use Thelia\Domain\Customer\Service\CustomerPersonalDataProviderInterface;
 use Thelia\Domain\Promotion\Coupon\Type\CouponInterface;
 use Thelia\Domain\Taxation\TaxEngine\TaxTypeInterface;
 use Thelia\Form\FormInterface;
@@ -84,7 +85,7 @@ class TheliaKernel extends Kernel
 {
     use MicroKernelTrait;
 
-    public const THELIA_VERSION = '3.0.0-beta1';
+    public const THELIA_VERSION = '3.0.0';
 
     protected SchemaLocator $propelSchemaLocator;
     protected PropelInitService $propelInitService;
@@ -243,17 +244,23 @@ class TheliaKernel extends Kernel
     protected function checkMySQLConfigurations(ConnectionInterface $con): void
     {
         if (!file_exists($this->getCacheDir().DS.'check_mysql_configurations.php')) {
-            $sessionSqlMode = [];
+            $serverSqlMode = [];
             $canUpdate = false;
             $logs = [];
+            // The verdict is cached across requests, so it must describe the
+            // server-configured sql_mode (@@GLOBAL, what every fresh connection
+            // inherits), never the current session: bin/install boots several
+            // kernels over one shared connection, and a session corrected by a
+            // previous kernel would cache a "nothing to do" verdict that every
+            // later web request would then run with.
             /** @var PDODataFetcher $result */
-            $result = $con->query('SELECT VERSION() as version, @@SESSION.sql_mode as session_sql_mode');
+            $result = $con->query('SELECT VERSION() as version, @@GLOBAL.sql_mode as global_sql_mode');
 
             if ($result && $data = $result->fetch(\PDO::FETCH_ASSOC)) {
-                $sessionSqlMode = explode(',', (string) $data['session_sql_mode']);
+                $serverSqlMode = explode(',', (string) $data['global_sql_mode']);
 
-                if (empty($sessionSqlMode[0])) {
-                    unset($sessionSqlMode[0]);
+                if (empty($serverSqlMode[0])) {
+                    unset($serverSqlMode[0]);
                 }
 
                 // MariaDB is not impacted by this problem
@@ -261,37 +268,23 @@ class TheliaKernel extends Kernel
                     // MySQL 5.6+ compatibility
                     if (version_compare($data['version'], '5.6.0', '>=')) {
                         // add NO_ENGINE_SUBSTITUTION
-                        if (!\in_array('NO_ENGINE_SUBSTITUTION', $sessionSqlMode, true)) {
-                            $sessionSqlMode[] = 'NO_ENGINE_SUBSTITUTION';
+                        if (!\in_array('NO_ENGINE_SUBSTITUTION', $serverSqlMode, true)) {
+                            $serverSqlMode[] = 'NO_ENGINE_SUBSTITUTION';
                             $canUpdate = true;
                             $logs[] = 'Add sql_mode NO_ENGINE_SUBSTITUTION. Please configure your MySQL server.';
                         }
 
-                        // remove STRICT_TRANS_TABLES
-                        if (($key = array_search('STRICT_TRANS_TABLES', $sessionSqlMode, true)) !== false) {
-                            unset($sessionSqlMode[$key]);
-                            $canUpdate = true;
-                            $logs[] = 'Remove sql_mode STRICT_TRANS_TABLES. Please configure your MySQL server.';
-                        }
-
                         // remove ONLY_FULL_GROUP_BY
-                        if (($key = array_search('ONLY_FULL_GROUP_BY', $sessionSqlMode, true)) !== false) {
-                            unset($sessionSqlMode[$key]);
+                        if (($key = array_search('ONLY_FULL_GROUP_BY', $serverSqlMode, true)) !== false) {
+                            unset($serverSqlMode[$key]);
                             $canUpdate = true;
                             $logs[] = 'Remove sql_mode ONLY_FULL_GROUP_BY. Please configure your MySQL server.';
                         }
                     }
                 } else {
-                    // MariaDB 10.2.4+ compatibility
-                    // remove STRICT_TRANS_TABLES
-                    if (version_compare($data['version'], '10.2.4', '>=') && $key = \in_array('STRICT_TRANS_TABLES', $sessionSqlMode, true)) {
-                        unset($sessionSqlMode[$key]);
-                        $canUpdate = true;
-                        $logs[] = 'Remove sql_mode STRICT_TRANS_TABLES. Please configure your MySQL server.';
-                    }
-
-                    if (version_compare($data['version'], '10.1.7', '>=') && !\in_array('NO_ENGINE_SUBSTITUTION', $sessionSqlMode, true)) {
-                        $sessionSqlMode[] = 'NO_ENGINE_SUBSTITUTION';
+                    // MariaDB 10.1.7+ compatibility
+                    if (version_compare($data['version'], '10.1.7', '>=') && !\in_array('NO_ENGINE_SUBSTITUTION', $serverSqlMode, true)) {
+                        $serverSqlMode[] = 'NO_ENGINE_SUBSTITUTION';
                         $canUpdate = true;
                         $logs[] = 'Add sql_mode NO_ENGINE_SUBSTITUTION. Please configure your MySQL server.';
                     }
@@ -307,7 +300,7 @@ class TheliaKernel extends Kernel
             (new Filesystem())->dumpFile(
                 $this->getCacheDir().DS.'check_mysql_configurations.php',
                 '<?php return '.VarExporter::export([
-                    'modes' => array_values($sessionSqlMode),
+                    'modes' => array_values($serverSqlMode),
                     'canUpdate' => $canUpdate,
                     'logs' => $logs,
                 ]).';',
@@ -469,6 +462,7 @@ class TheliaKernel extends Kernel
             ContainerAwareInterface::class => 'thelia.command',
             ControllerInterface::class => 'controller.service_arguments',
             TaxTypeInterface::class => 'thelia.taxType',
+            CustomerPersonalDataProviderInterface::class => 'thelia.customer.personal_data_provider',
 
             QueryCollectionExtensionInterface::class => 'thelia.api.propel.query_extension.collection',
             QueryItemExtensionInterface::class => 'thelia.api.propel.query_extension.item',
@@ -785,15 +779,59 @@ class TheliaKernel extends Kernel
 
         $container = $this->container;
 
+        self::configureTrustedRequestSources($container);
+
+        return $container;
+    }
+
+    /**
+     * Applies framework.trusted_hosts and framework.trusted_proxies to the Request class.
+     *
+     * FrameworkExtension stores a single trusted host or proxy as a scalar, and trusted
+     * headers as the list of header names taken from the configuration, while Request
+     * expects an array of host patterns and a bitmask of Request::HEADER_* constants.
+     */
+    protected static function configureTrustedRequestSources(ContainerInterface $container): void
+    {
         if ($container->hasParameter('kernel.trusted_hosts') && $trustedHosts = $container->getParameter('kernel.trusted_hosts')) {
-            Request::setTrustedHosts($trustedHosts);
+            Request::setTrustedHosts(\is_array($trustedHosts) ? $trustedHosts : preg_split('/\s*+,\s*+(?![^{]*})/', (string) $trustedHosts));
         }
 
         if ($container->hasParameter('kernel.trusted_proxies') && $container->hasParameter('kernel.trusted_headers') && $trustedProxies = $container->getParameter('kernel.trusted_proxies')) {
-            Request::setTrustedProxies(\is_array($trustedProxies) ? $trustedProxies : array_map('trim', explode(',', (string) $trustedProxies)), $container->getParameter('kernel.trusted_headers'));
+            Request::setTrustedProxies(
+                \is_array($trustedProxies) ? $trustedProxies : array_map('trim', explode(',', (string) $trustedProxies)),
+                self::trustedHeaderSet($container->getParameter('kernel.trusted_headers')),
+            );
+        }
+    }
+
+    private static function trustedHeaderSet(array|bool|float|int|string|\UnitEnum|null $trustedHeaders): int
+    {
+        if (\is_int($trustedHeaders)) {
+            return $trustedHeaders;
         }
 
-        return $container;
+        if (\is_string($trustedHeaders)) {
+            $trustedHeaders = array_map('trim', explode(',', $trustedHeaders));
+        }
+
+        if (!\is_array($trustedHeaders)) {
+            return Request::HEADER_X_FORWARDED_FOR | Request::HEADER_X_FORWARDED_PORT | Request::HEADER_X_FORWARDED_PROTO;
+        }
+
+        $trustedHeaderSet = 0;
+
+        foreach ($trustedHeaders as $trustedHeader) {
+            $constant = Request::class.'::HEADER_'.strtr(strtoupper((string) $trustedHeader), '-', '_');
+
+            if (!\defined($constant)) {
+                throw new \InvalidArgumentException(\sprintf('The trusted header "%s" is not supported.', $trustedHeader));
+            }
+
+            $trustedHeaderSet |= \constant($constant);
+        }
+
+        return $trustedHeaderSet;
     }
 
     private function loadModuleTranslationDirectories(

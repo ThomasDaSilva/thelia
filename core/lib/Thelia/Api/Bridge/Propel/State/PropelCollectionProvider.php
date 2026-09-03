@@ -18,17 +18,20 @@ use ApiPlatform\Metadata\Exception\RuntimeException;
 use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProviderInterface;
 use Propel\Runtime\ActiveQuery\ModelCriteria;
+use Propel\Runtime\Collection\ObjectCollection;
 use Propel\Runtime\Util\PropelModelPager;
 use Thelia\Api\Bridge\Propel\Extension\QueryResultCollectionExtensionInterface;
 use Thelia\Api\Bridge\Propel\Service\ApiResourcePropelTransformerService;
+use Thelia\Api\Bridge\Propel\Service\PropelRelationPreloader;
 use Thelia\Api\Bridge\Propel\State\Pagination\PropelPaginator;
 use Thelia\Api\Resource\PropelResourceInterface;
-use Thelia\Model\LangQuery;
+use Thelia\Model\Lang;
 
 readonly class PropelCollectionProvider implements ProviderInterface
 {
     public function __construct(
         private ApiResourcePropelTransformerService $apiResourcePropelTransformerService,
+        private PropelRelationPreloader $propelRelationPreloader,
         private iterable $propelCollectionExtensions = [],
     ) {
     }
@@ -69,7 +72,13 @@ readonly class PropelCollectionProvider implements ProviderInterface
             $results = $query->find();
         }
 
-        $langs = LangQuery::create()->filterByActive(1)->find();
+        $langs = Lang::getActiveLangs();
+
+        $models = $results instanceof PropelModelPager ? $results->getResults() : $results;
+
+        if ($models instanceof ObjectCollection) {
+            $this->propelRelationPreloader->preload($models, $resourceClass, $context);
+        }
 
         if ($results instanceof PropelModelPager) {
             $resources = array_map(

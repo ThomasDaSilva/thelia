@@ -14,6 +14,7 @@ declare(strict_types=1);
 
 namespace Symfony\Component\DependencyInjection\Loader\Configurator;
 
+use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\HttpFoundation\Session\Storage\SessionStorageFactoryInterface;
 use Symfony\Component\VarExporter\Exception\ClassNotFoundException;
 use Thelia\Core\Cache\ConfigCacheService;
@@ -25,8 +26,11 @@ use Thelia\Model\ConfigQuery;
 use Thelia\Model\Module;
 use Thelia\Model\ModuleQuery;
 
-return static function (ContainerConfigurator $configurator): void {
-    // Import service configurations
+return static function (ContainerConfigurator $configurator, ContainerBuilder $container): void {
+    // Import service configurations. Everything the core declares for another
+    // bundle is prepended, here and in packages/*.php: the kernel loads this file
+    // a second time from buildContainer(), after the shop's own config/packages,
+    // and a default must never win over the file the shop wrote.
     $configurator->import('packages/*');
     $configurator->import('parameters/*');
     $configurator->import('services/*');
@@ -52,6 +56,21 @@ return static function (ContainerConfigurator $configurator): void {
         ->bind('$apiResourceAddons', '%Thelia.api.resource.addons%')
         ->bind(Request::class, expr('service("request_stack").getMainRequest()'));
 
+    // TheliaKernel loads this file twice: once from configureContainer(), then again from
+    // buildContainer() through loadService(). The PSR-4 registration below redefines every
+    // Thelia\ class, so the second pass overwrites the definitions the services/*.php files
+    // declared in between and drops the public flag they set. The container then rejects
+    // $container->get() on those services (see https://github.com/thelia/thelia/issues/3675).
+    // Note which services are public before the registration and mark them public again after,
+    // so a declared visibility survives whatever the load redefines.
+    $publicServiceIds = [];
+
+    foreach ($container->getDefinitions() as $serviceId => $definition) {
+        if ($definition->isPublic()) {
+            $publicServiceIds[] = $serviceId;
+        }
+    }
+
     $serviceConfigurator->load('Thelia\\', THELIA_LIB)
         ->exclude(
             [
@@ -61,6 +80,12 @@ return static function (ContainerConfigurator $configurator): void {
         )
         ->autowire()
         ->autoconfigure();
+
+    foreach ($publicServiceIds as $serviceId) {
+        if ($container->hasDefinition($serviceId)) {
+            $container->getDefinition($serviceId)->setPublic(true);
+        }
+    }
 
     $serviceConfigurator->set(SessionStorageFactory::class)
         ->args(['%kernel.project_dir%/var/sessions/%kernel.environment%'])
@@ -101,7 +126,7 @@ return static function (ContainerConfigurator $configurator): void {
             'mailer' => [
                 'dsn' => addslashes($dsn),
             ],
-        ]);
+        ], prepend: true);
     }
 
     if ($propelAvailable) {
@@ -136,7 +161,7 @@ return static function (ContainerConfigurator $configurator): void {
             }
         }
 
-        $configurator->extension('api_platform', ['mapping' => ['paths' => $apiResourcePaths]]);
+        $configurator->extension('api_platform', ['mapping' => ['paths' => $apiResourcePaths]], prepend: true);
     }
 
     $serviceConfigurator->get(ConfigCacheService::class)

@@ -15,6 +15,7 @@ declare(strict_types=1);
 namespace Thelia\Test;
 
 use Propel\Runtime\Connection\ConnectionInterface;
+use Thelia\Core\Security\AccessManager;
 use Thelia\Domain\Taxation\TaxEngine\TaxType\PricePercentTaxType;
 use Thelia\Model\Address;
 use Thelia\Model\Admin;
@@ -22,6 +23,8 @@ use Thelia\Model\Attribute;
 use Thelia\Model\AttributeAv;
 use Thelia\Model\Brand;
 use Thelia\Model\Cart;
+use Thelia\Model\CartAddress;
+use Thelia\Model\CartItem;
 use Thelia\Model\Category;
 use Thelia\Model\Content;
 use Thelia\Model\Country;
@@ -45,6 +48,9 @@ use Thelia\Model\OrderStatusQuery;
 use Thelia\Model\Product;
 use Thelia\Model\ProductSaleElements;
 use Thelia\Model\Profile;
+use Thelia\Model\ProfileResource;
+use Thelia\Model\Resource;
+use Thelia\Model\ResourceQuery;
 use Thelia\Model\Tax;
 use Thelia\Model\TaxRule;
 use Thelia\Model\TaxRuleQuery;
@@ -242,9 +248,58 @@ final class FixtureFactory
         $admin->setPassword($overrides['password'] ?? 'password');
         $admin->setLocale($overrides['locale'] ?? 'en_US');
         $admin->setEmail($overrides['email'] ?? 'admin-'.$n.'@test.com');
+
+        if (isset($overrides['profile'])) {
+            $admin->setProfileId($overrides['profile']->getId());
+        }
+
         $admin->save($this->connection);
 
         return $admin;
+    }
+
+    /**
+     * Creates an administrator whose profile grants exactly the accesses given,
+     * as [AdminResources code => list of AccessManager constants]. Unlike an
+     * admin() with no profile, which is a superadministrator, such an
+     * administrator is subject to the per-resource permission checks.
+     *
+     * @param array<string, list<string>> $grants
+     */
+    public function restrictedAdmin(array $grants, array $overrides = []): Admin
+    {
+        $profile = $this->profile();
+
+        foreach ($grants as $resourceCode => $accesses) {
+            $this->profileResource($profile, $resourceCode, $accesses);
+        }
+
+        return $this->admin($overrides + ['profile' => $profile]);
+    }
+
+    /**
+     * @param list<string> $accesses
+     */
+    public function profileResource(Profile $profile, string $resourceCode, array $accesses = [AccessManager::VIEW]): ProfileResource
+    {
+        $resource = ResourceQuery::create()->findOneByCode($resourceCode, $this->connection);
+
+        if (!$resource instanceof Resource) {
+            $resource = new Resource();
+            $resource->setCode($resourceCode);
+            $resource->save($this->connection);
+        }
+
+        $accessManager = new AccessManager(0);
+        $accessManager->build($accesses);
+
+        $profileResource = new ProfileResource();
+        $profileResource->setProfileId($profile->getId());
+        $profileResource->setResourceId($resource->getId());
+        $profileResource->setAccess($accessManager->getAccessValue());
+        $profileResource->save($this->connection);
+
+        return $profileResource;
     }
 
     public function address(
@@ -386,6 +441,7 @@ final class FixtureFactory
 
         $status = new OrderStatus();
         $status->setCode($overrides['code'] ?? 'status-'.$n);
+        $status->setEquivalentCode($overrides['equivalentCode'] ?? null);
         $status->setColor($overrides['color'] ?? '#cccccc');
         $status->setLocale($overrides['locale'] ?? 'en_US');
         $status->setTitle($overrides['title'] ?? 'Status '.$n);
@@ -414,6 +470,35 @@ final class FixtureFactory
         $address->save($this->connection);
 
         return $address;
+    }
+
+    /**
+     * Creates the cart's own copy of an address. Pass the customer address it
+     * was copied from, or nothing for an address typed in at checkout and
+     * never saved to the account — which is a row with no `address_id`.
+     */
+    public function cartAddress(
+        ?Address $address = null,
+        ?Country $country = null,
+        ?CustomerTitle $title = null,
+        array $overrides = [],
+    ): CartAddress {
+        $n = $this->next();
+
+        $cartAddress = new CartAddress();
+        $cartAddress->setAddressId($address?->getId());
+        $cartAddress->setCustomerTitleId(($title ?? $this->customerTitle())->getId());
+        $cartAddress->setFirstname($overrides['firstname'] ?? $address?->getFirstname() ?? 'John');
+        $cartAddress->setLastname($overrides['lastname'] ?? $address?->getLastname() ?? 'Doe');
+        $cartAddress->setAddress1($overrides['address1'] ?? $address?->getAddress1() ?? $n.' Main Street');
+        $cartAddress->setAddress2($overrides['address2'] ?? '');
+        $cartAddress->setAddress3($overrides['address3'] ?? '');
+        $cartAddress->setZipcode($overrides['zipcode'] ?? $address?->getZipcode() ?? '75001');
+        $cartAddress->setCity($overrides['city'] ?? $address?->getCity() ?? 'Paris');
+        $cartAddress->setCountryId(($country ?? $this->country())->getId());
+        $cartAddress->save($this->connection);
+
+        return $cartAddress;
     }
 
     public function coupon(array $overrides = []): Coupon
@@ -489,6 +574,32 @@ final class FixtureFactory
         $cart->save($this->connection);
 
         return $cart;
+    }
+
+    /**
+     * Creates a CartItem in the given cart. The product's default
+     * ProductSaleElements is used unless another one is passed.
+     */
+    public function cartItem(
+        Cart $cart,
+        Product $product,
+        ?ProductSaleElements $productSaleElements = null,
+        array $overrides = [],
+    ): CartItem {
+        $productSaleElements ??= $product->getProductSaleElementss()->getFirst()
+            ?? throw new \RuntimeException('The product has no ProductSaleElements to build a CartItem from.');
+
+        $cartItem = new CartItem();
+        $cartItem->setCartId($cart->getId());
+        $cartItem->setProductId($product->getId());
+        $cartItem->setProductSaleElementsId($productSaleElements->getId());
+        $cartItem->setQuantity($overrides['quantity'] ?? 1.0);
+        $cartItem->setPrice($overrides['price'] ?? '10.000000');
+        $cartItem->setPromoPrice($overrides['promoPrice'] ?? '10.000000');
+        $cartItem->setPromo($overrides['promo'] ?? 0);
+        $cartItem->save($this->connection);
+
+        return $cartItem;
     }
 
     /**

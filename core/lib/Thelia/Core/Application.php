@@ -21,6 +21,7 @@ use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\HttpKernel\KernelInterface;
+use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 use Thelia\Command\Install;
 
 /**
@@ -56,13 +57,26 @@ class Application extends BaseApplication
     {
         $this->registerCommands();
 
+        // Without a dispatcher, Symfony's console runs the command and returns
+        // without emitting console.command, console.error or console.terminate.
+        // Whatever the application defers to the end of the process then never
+        // runs: a cache clear queued by a module activation, for one, so the
+        // command reports success while leaving a container that still
+        // describes the previous state.
+        $container = $this->kernel->getContainer();
+        $dispatcher = $container->has('event_dispatcher') ? $container->get('event_dispatcher') : null;
+
+        if ($dispatcher instanceof EventDispatcherInterface) {
+            $this->setDispatcher($dispatcher);
+        }
+
         return parent::doRun($input, $output);
     }
 
     protected function registerCommands(): void
     {
         if (!TheliaKernel::isInstalled()) {
-            $this->add(new Install($this->kernel->getEnvironment()));
+            $this->addCommand(new Install($this->kernel->getEnvironment()));
 
             return;
         }
@@ -89,7 +103,7 @@ class Application extends BaseApplication
                 throw new \LogicException(\sprintf('The command "%s" must be an instance of "%s".', $commandId, Command::class));
             }
 
-            $this->add($command);
+            $this->addCommand($command);
         }
     }
 }

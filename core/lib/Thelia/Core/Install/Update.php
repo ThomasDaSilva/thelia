@@ -15,10 +15,12 @@ declare(strict_types=1);
 namespace Thelia\Core\Install;
 
 use Michelf\Markdown;
+use Propel\Runtime\Connection\ConnectionInterface;
 use Propel\Runtime\Connection\ConnectionWrapper;
 use Propel\Runtime\Propel;
 use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\Finder\Finder;
+use Symfony\Component\Finder\SplFileInfo;
 use Symfony\Component\Translation\Translator;
 use Symfony\Component\Yaml\Exception\ParseException;
 use Thelia\Config\DatabaseConfigurationSource;
@@ -40,6 +42,13 @@ class Update
     public const PHP_DIR = 'update/php/';
     public const INSTRUCTION_DIR = 'update/instruction/';
 
+    /**
+     * The oldest database version an in-place update can start from. Thelia 3
+     * ships no update script between 2.5.5 and 3.0.0-alpha1, so any database
+     * below this belongs to Thelia 2 and needs the guided migration instead.
+     */
+    public const MIN_UPDATABLE_VERSION = '3.0.0-alpha1';
+
     protected array $version;
     protected ?Tlog $logger;
 
@@ -50,8 +59,9 @@ class Update
     protected array $postInstructions = [];
 
     protected array $updatedVersions = [];
-    protected \PDO $connection;
+    protected ConnectionInterface|\PDO $connection;
     protected ?string $backupFile = null;
+    protected ?string $restoreFailure = null;
     protected string $backupDir = 'local/backup/';
     protected array $messages = [];
     protected Translator $translator;
@@ -69,14 +79,19 @@ class Update
         }
 
         try {
-            $this->connection = Propel::getConnection(
+            $connection = Propel::getConnection(
                 ProductTableMap::DATABASE_NAME,
             );
 
-            // Get the PDO connection from the WrappedConnection
-            if ($this->connection instanceof ConnectionWrapper) {
-                $this->connection = $this->connection->getWrappedConnection();
+            // Unwrap the wrapper Propel returns, so that the update runs on the one
+            // connection it opened rather than through its transaction bookkeeping.
+            // What comes out is a PdoConnection, not a \PDO: it exposes the same
+            // query(), prepare() and exec(), and keeps its own \PDO private.
+            if ($connection instanceof ConnectionWrapper) {
+                $connection = $connection->getWrappedConnection();
             }
+
+            $this->connection = $connection;
         } catch (ParseException $ex) {
             throw new UpdateException('database.yml is not a valid file : '.$ex->getMessage());
         } catch (\PDOException $ex) {
@@ -133,7 +148,49 @@ class Update
 
         $lastEntry = end($this->version);
 
-        return $lastEntry === $version;
+        return version_compare((string) $lastEntry, (string) $version, '<=') === true;
+    }
+
+    /**
+     * Whether an in-place update can start from this database version. Thelia 3
+     * only continues an update already on the 3.x line: any version below
+     * 3.0.0-alpha1 belongs to Thelia 2 and needs the guided migration instead.
+     */
+    public static function isVersionUpdatable(string $currentVersion): bool
+    {
+        return version_compare($currentVersion, self::MIN_UPDATABLE_VERSION, '>=');
+    }
+
+    /**
+     * Find the position of the current version in the update script list.
+     *
+     * Some releases ship without an update script, so the current version is not always part of
+     * that list. In that case, the update resumes from the closest known version below the
+     * current one instead of replaying every script from the beginning.
+     *
+     * @throws UpdateException when no known version precedes the current one
+     */
+    protected function getStartIndex(string $currentVersion): int
+    {
+        $index = array_search($currentVersion, $this->version, true);
+
+        if (false !== $index) {
+            return (int) $index;
+        }
+
+        $closestIndex = null;
+
+        foreach ($this->version as $position => $knownVersion) {
+            if (version_compare($knownVersion, $currentVersion, '<=')) {
+                $closestIndex = $position;
+            }
+        }
+
+        if (null === $closestIndex) {
+            throw new UpdateException(\sprintf('Unknown installed version "%s", unable to find where to start the update.', $currentVersion));
+        }
+
+        return $closestIndex;
     }
 
     public function process(): array
@@ -149,31 +206,59 @@ class Update
             throw new UpToDateException('You already have the latest version. No update available');
         }
 
-        $index = array_search($currentVersion, $this->version, true);
+        // A Thelia 3 codebase only continues an update already on the 3.x line.
+        // Its update scripts jump straight from 2.5.5 to 3.0.0-alpha1, so a Thelia
+        // 2.6 database would be mistaken for 2.5.5 and have the 3.0 migrations
+        // replayed over a schema they were never written for. Refuse before writing
+        // anything: moving from Thelia 2 is a guided migration, not an in-place
+        // update (see UPDATE.md).
+        if (!self::isVersionUpdatable((string) $currentVersion)) {
+            throw new UpdateException(\sprintf('This database is on Thelia %s. Thelia 3 cannot update a Thelia 2 database in place; follow the migration guide at https://doc.thelia.net/docs/upgrading/migrate before updating.', $currentVersion));
+        }
 
-        $this->connection->beginTransaction();
+        $index = $this->getStartIndex((string) $currentVersion);
 
+        // The loop runs outside any transaction. MariaDB commits implicitly on every
+        // CREATE, ALTER and DROP, so a transaction spanning a schema migration ends at
+        // the first one and leaves everything written before it committed: it promises
+        // all-or-nothing and delivers neither. What makes an interrupted run recoverable
+        // is the version marker updateToVersion() writes after each version, so the next
+        // run resumes where this one stopped, and the backup update.php offers
+        // beforehand, the only thing that can undo a schema change.
         $database = new Database($this->connection);
         $version = null;
 
         try {
             $size = \count($this->version);
 
-            for ($i = ++$index; $i < $size; ++$i) {
+            for ($i = $index + 1; $i < $size; ++$i) {
                 $version = $this->version[$i];
                 $this->updateToVersion($version, $database);
                 $this->updatedVersions[] = $version;
             }
 
-            $currentVersion = Version::parse();
-            $this->log('debug', \sprintf('setting database configuration to %s', $currentVersion['version']));
-            $updateConfigVersion = [
-                'thelia_version' => $currentVersion['version'],
-                'thelia_major_version' => $currentVersion['major'],
-                'thelia_minus_version' => $currentVersion['minus'],
-                'thelia_release_version' => $currentVersion['release'],
-                'thelia_extra_version' => $currentVersion['extra'],
-            ];
+            // The variables set below track the database update level (the last update
+            // script applied), not the code version: update scripts are committed before
+            // the version number itself is bumped, so using the code version here would
+            // make the last script run again on every following update. thelia_version
+            // has already been set to $version by updateToVersion(); only the derived
+            // variables are recomputed, from that same script version.
+            $updateConfigVersion = [];
+
+            try {
+                $parsedVersion = Version::parse($version);
+
+                $updateConfigVersion = [
+                    'thelia_major_version' => $parsedVersion['major'],
+                    'thelia_minus_version' => $parsedVersion['minus'],
+                    'thelia_release_version' => $parsedVersion['release'],
+                    'thelia_extra_version' => $parsedVersion['extra'],
+                ];
+            } catch (\InvalidArgumentException) {
+                $this->log('error', \sprintf('unable to parse version %s, detailed version variables were left unchanged', $version));
+            }
+
+            $this->log('debug', \sprintf('setting database configuration to %s', $version));
 
             foreach ($updateConfigVersion as $name => $value) {
                 $stmt = $this->connection->prepare('SELECT * FROM `config` WHERE `name` = ?');
@@ -181,23 +266,24 @@ class Update
 
                 if ($stmt->rowCount()) {
                     $stmt = $this->connection->prepare('UPDATE `config` SET `value` = ? WHERE `name` = ?');
-                    $stmt->execute([$version, $value]);
+                    $stmt->execute([$value, $name]);
                 } else {
-                    $stmt = $this->connection->prepare('INSERT INTO `config` (?) VALUES (?)');
-                    $stmt->execute([$version, $value]);
+                    $stmt = $this->connection->prepare('INSERT INTO `config` (`name`, `value`, `secured`, `hidden`, `created_at`, `updated_at`) VALUES (?, ?, 1, 1, NOW(), NOW())');
+                    $stmt->execute([$name, $value]);
                 }
             }
 
-            $this->connection->commit();
             $this->log('debug', 'update successfully');
         } catch (\Exception $exception) {
-            if ($this->connection->inTransaction()) {
-                $this->connection->rollBack();
-            }
-
             $this->log('error', \sprintf('error during update process with message : %s', $exception->getMessage()));
 
-            $ex = new UpdateException($exception->getMessage(), $exception->getCode(), $exception->getPrevious());
+            // A failing statement reaches here as a PDOException, whose getCode() is the
+            // SQLSTATE string ('42S02'). Exception only takes an int, so wrapping it
+            // raised a TypeError of its own and no SQL failure ever reached update.php:
+            // the operator got a fatal error instead of the offer to restore the backup.
+            $code = $exception->getCode();
+
+            $ex = new UpdateException($exception->getMessage(), \is_int($code) ? $code : 0, $exception);
             $ex->setVersion($version);
 
             throw $ex;
@@ -265,6 +351,10 @@ class Update
      */
     public function restoreDb(): bool
     {
+        if (null === $this->backupFile) {
+            return false;
+        }
+
         $database = new Database($this->connection);
 
         try {
@@ -276,13 +366,25 @@ class Update
 
             $database->restoreDb($this->backupFile);
         } catch (\Exception $exception) {
+            // Kept for the caller to print: it names the table the restore stopped on,
+            // and what the database holds now. Written on the object rather than echoed,
+            // so the caller decides where it goes.
+            $this->restoreFailure = $exception->getMessage();
+
             $this->log('error', \sprintf('error during restore process with message : %s', $exception->getMessage()));
-            echo $exception->getMessage();
 
             return false;
         }
 
         return true;
+    }
+
+    /**
+     * Why the last restore failed, or null if none did.
+     */
+    public function getRestoreFailure(): ?string
+    {
+        return $this->restoreFailure;
     }
 
     public function getBackupFile(): ?string
@@ -297,29 +399,30 @@ class Update
 
     protected function log($level, $message): void
     {
-        if ($this->usePropel) {
-            switch ($level) {
-                case 'debug':
-                    $this->logger->debug($message);
-                    break;
-                case 'info':
-                    $this->logger->info($message);
-                    break;
-                case 'notice':
-                    $this->logger->notice($message);
-                    break;
-                case 'warning':
-                    $this->logger->warning($message);
-                    break;
-                case 'error':
-                    $this->logger->error($message);
-                    break;
-                case 'critical':
-                    $this->logger->critical($message);
-                    break;
-            }
-        } else {
+        if (!$this->usePropel) {
             $this->logs[] = [$level, $message];
+
+            return;
+        }
+
+        if (!$this->logger instanceof Tlog) {
+            return;
+        }
+
+        // Tlog keys its levels by the numeric constants, not by the PSR-3 names, so passing
+        // 'debug' straight to Tlog::log() would silently log nothing.
+        $tlogLevel = match ($level) {
+            'debug' => Tlog::DEBUG,
+            'info' => Tlog::INFO,
+            'notice' => Tlog::NOTICE,
+            'warning' => Tlog::WARNING,
+            'error' => Tlog::ERROR,
+            'critical' => Tlog::CRITICAL,
+            default => null,
+        };
+
+        if (null !== $tlogLevel) {
+            $this->logger->log($tlogLevel, $message);
         }
     }
 
@@ -377,15 +480,16 @@ class Update
 
     public function setCurrentVersion($version): void
     {
-        if ($this->connection instanceof \PDO) {
-            try {
-                $stmt = $this->connection->prepare('UPDATE config set value = ? where name = ?');
-                $stmt->execute([$version, 'thelia_version']);
-            } catch (\PDOException $e) {
-                $this->log('error', \sprintf('Error setting current version : %s', $e->getMessage()));
+        // No instanceof \PDO guard here: the connection Propel hands out is a
+        // PdoConnection, so the guard silently skipped the only write that records
+        // how far the update went, and every run started over from the same version.
+        try {
+            $stmt = $this->connection->prepare('UPDATE config set value = ? where name = ?');
+            $stmt->execute([$version, 'thelia_version']);
+        } catch (\PDOException $e) {
+            $this->log('error', \sprintf('Error setting current version : %s', $e->getMessage()));
 
-                throw $e;
-            }
+            throw $e;
         }
     }
 
@@ -396,12 +500,12 @@ class Update
      */
     public function getDataBaseSize(): float
     {
-        $stmt = $this->connection->query(
+        $statement = $this->connection->query(
             "SELECT sum(data_length) / 1024 / 1024 'size' FROM information_schema.TABLES WHERE table_schema = DATABASE() GROUP BY table_schema",
         );
 
-        if ($stmt->rowCount()) {
-            return (float) $stmt->fetch(\PDO::FETCH_OBJ)->size;
+        if ($statement instanceof \PDOStatement && $statement->rowCount() > 0) {
+            return (float) $statement->fetch(\PDO::FETCH_OBJ)->size;
         }
 
         throw new \Exception('Impossible to calculate the database size');
@@ -409,26 +513,43 @@ class Update
 
     /**
      * Checks whether it is possible to make a data base backup.
+     *
+     * The backup accumulates the whole dump in memory, so a finite memory_limit
+     * caps the database size the backup can handle. A negative memory_limit
+     * means unlimited memory: the backup is always possible.
      */
     public function checkBackupIsPossible(): bool
     {
-        $size = 0;
+        $memoryLimit = self::parseMemoryLimit(\ini_get('memory_limit'));
 
-        if (preg_match('/^(\d+)(.)$/', \ini_get('memory_limit'), $matches)) {
-            switch (strtolower($matches[2])) {
-                case 'k':
-                    $size = $matches[1] / 1024;
-                    break;
-                case 'm':
-                    $size = $matches[1];
-                    break;
-                case 'g':
-                    $size = $matches[1] * 1024;
-                    break;
-            }
+        if ($memoryLimit < 0) {
+            return true;
         }
 
-        return !($this->getDataBaseSize() > ($size - 64) / 8);
+        $memoryLimitInMegabytes = $memoryLimit / (1024 ** 2);
+
+        return !($this->getDataBaseSize() > ($memoryLimitInMegabytes - 64) / 8);
+    }
+
+    /**
+     * Converts a php.ini shorthand-byte value to bytes, following the PHP
+     * semantics: the leading integer part is kept (a fractional prefix such as
+     * "0.5G" truncates to 0), the k/m/g suffix is case-insensitive, and a value
+     * without a suffix is already in bytes. A negative result means unlimited.
+     *
+     * @internal exposed for tests
+     */
+    public static function parseMemoryLimit(string $memoryLimit): int
+    {
+        $memoryLimit = trim($memoryLimit);
+        $bytes = (int) $memoryLimit;
+
+        return match (strtolower(substr($memoryLimit, -1))) {
+            'k' => $bytes * 1024,
+            'm' => $bytes * 1024 ** 2,
+            'g' => $bytes * 1024 ** 3,
+            default => $bytes,
+        };
     }
 
     public function getLatestVersion(): mixed
@@ -512,11 +633,11 @@ class Update
         $list = [];
         $finder = new Finder();
         $path = \sprintf('%s%s', THELIA_SETUP_DIRECTORY, str_replace('/', DS, self::SQL_DIR));
-        $sort = static function (\SplFileInfo $a, \SplFileInfo $b): int {
-            $a = strtolower(substr($a->getRelativePathname(), 0, -4));
-            $b = strtolower(substr($b->getRelativePathname(), 0, -4));
+        $sort = static function (SplFileInfo $a, SplFileInfo $b): int {
+            $left = strtolower(substr($a->getRelativePathname(), 0, -4));
+            $right = strtolower(substr($b->getRelativePathname(), 0, -4));
 
-            return version_compare($a, $b);
+            return (int) version_compare($left, $right);
         };
 
         $files = $finder->name('*.sql')->in($path)->sort($sort);
@@ -567,6 +688,10 @@ class Update
         curl_setopt($curl, \CURLOPT_CONNECTTIMEOUT, 5);
         curl_setopt($curl, \CURLOPT_TIMEOUT, 5);
         $res = curl_exec($curl);
+
+        if (!\is_string($res)) {
+            return null;
+        }
 
         try {
             if (Version::parse($res)) {

@@ -19,16 +19,19 @@ use Symfony\Component\HttpFoundation\File\Exception\FileException;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Validator\Constraints as Assert;
+use Thelia\Action\Image as ImageAction;
 use Thelia\Core\Event\File\FileCreateOrUpdateEvent;
 use Thelia\Core\Event\Image\ImageEvent;
 use Thelia\Core\Event\TheliaEvents;
 use Thelia\Core\File\FileModelInterface;
+use Thelia\Core\File\Service\FileProcessorService;
 use Thelia\Model\ConfigQuery;
 
 readonly class ItemFileResourceService
 {
     public function __construct(
         private EventDispatcherInterface $eventDispatcher,
+        private FileProcessorService $fileProcessorService,
     ) {
     }
 
@@ -46,18 +49,31 @@ readonly class ItemFileResourceService
             throw new FileException($file->getErrorMessage());
         }
 
+        // The shop upload policy, the one the back office applies (FileConfiguration).
+        // The API used to carry its own copy as per-resource constraints, which said
+        // something else and covered images only.
+        $this->fileProcessorService->validateUpload($file, $fileType);
+        $this->fileProcessorService->sanitizeUpload($file);
+
+        // The Propel setters are natively typed, so the raw strings of a multipart
+        // body have to be converted before they reach the model.
         $fileModel->setParentId($parentId)
-            ->setVisible(filter_var($request->request->get('visible'), \FILTER_VALIDATE_BOOLEAN))
-            ->setPosition($request->request->get('position'));
+            ->setVisible((int) filter_var($request->request->get('visible', '1'), \FILTER_VALIDATE_BOOLEAN));
 
-        $i18ns = json_decode((string) $request->request->get('i18ns'), true);
+        $position = $request->request->get('position');
 
-        foreach ($i18ns as $locale => $i18n) {
+        if (null !== $position && '' !== $position) {
+            $fileModel->setPosition((int) $position);
+        }
+
+        $i18ns = json_decode((string) $request->request->get('i18ns', '{}'), true);
+
+        foreach (\is_array($i18ns) ? $i18ns : [] as $locale => $i18n) {
             $fileModel->setLocale($locale)
-                ->setTitle($i18n['title'] ?? null)
-                ->setDescription($i18n['description'])
-                ->setChapo($i18n['chapo'])
-                ->setPostscriptum($i18n['postscriptum']);
+                ->setTitle($i18n['title'] ?? '')
+                ->setDescription($i18n['description'] ?? '')
+                ->setChapo($i18n['chapo'] ?? '')
+                ->setPostscriptum($i18n['postscriptum'] ?? '');
         }
 
         $fileEvent = new FileCreateOrUpdateEvent($parentId);
@@ -66,7 +82,7 @@ readonly class ItemFileResourceService
 
         $file = $this->eventDispatcher->dispatch(
             $fileEvent,
-            TheliaEvents::DOCUMENT_SAVE,
+            'image' === $fileType ? TheliaEvents::IMAGE_SAVE : TheliaEvents::DOCUMENT_SAVE,
         );
 
         if ('image' !== $fileType) {
@@ -95,7 +111,7 @@ readonly class ItemFileResourceService
         $event->setHeight(100);
         $event->setWidth(200);
         $event->setRotation(0);
-        $event->setResizeMode(1);
+        $event->setResizeMode((string) ImageAction::EXACT_RATIO_WITH_BORDERS);
 
         $this->eventDispatcher->dispatch($event, TheliaEvents::IMAGE_PROCESS);
     }

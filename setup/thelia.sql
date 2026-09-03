@@ -491,6 +491,7 @@ CREATE TABLE `customer`
     `enable` TINYINT DEFAULT 0,
     `confirmation_token` VARCHAR(255),
     `confirmation_token_expires_at` DATETIME NULL,
+    `anonymized_at` DATETIME COMMENT 'when the identifying data of the account was erased, NULL as long as the account carries an identity',
     `created_at` DATETIME,
     `updated_at` DATETIME,
     `version` INTEGER DEFAULT 0,
@@ -501,6 +502,7 @@ CREATE TABLE `customer`
     INDEX `idx_customer_customer_title_id` (`title_id`),
     INDEX `idx_customer_lang_id` (`lang_id`),
     INDEX `idx_email` (`email`),
+    INDEX `idx_customer_anonymized_at` (`anonymized_at`),
     CONSTRAINT `fk_customer_customer_title_id`
         FOREIGN KEY (`title_id`)
         REFERENCES `customer_title` (`id`)
@@ -526,6 +528,8 @@ CREATE TABLE `address`
     `customer_id` INTEGER NOT NULL,
     `title_id` INTEGER NOT NULL,
     `company` VARCHAR(255),
+    `siret` VARCHAR(20),
+    `vat_number` VARCHAR(20),
     `firstname` VARCHAR(255) NOT NULL,
     `lastname` VARCHAR(255) NOT NULL,
     `address1` VARCHAR(255) NOT NULL,
@@ -720,11 +724,14 @@ CREATE TABLE `order`
     `delivery_ref` VARCHAR(100) COMMENT 'delivery reference - usually use to identify a delivery progress on a distant delivery tracker website',
     `invoice_ref` VARCHAR(100) COMMENT 'the invoice reference',
     `discount` DECIMAL(16,6) DEFAULT 0.000000,
+    `customer_discount_rate` DECIMAL(16,6) DEFAULT 0.000000 COMMENT 'the customer discount rate, as a percentage, already included in the order products prices',
     `postage` DECIMAL(16,6) DEFAULT 0.000000 NOT NULL,
     `postage_tax` DECIMAL(16,6) DEFAULT 0.000000 NOT NULL,
     `postage_tax_rule_title` VARCHAR(255),
-    `payment_module_id` INTEGER NOT NULL,
-    `delivery_module_id` INTEGER NOT NULL,
+    `payment_module_id` INTEGER COMMENT 'the module that took the payment, NULL once that module is gone',
+    `payment_module_title` VARCHAR(255) COMMENT 'the name the payment module had when it was deleted, NULL while the module is still installed',
+    `delivery_module_id` INTEGER COMMENT 'the module that shipped the order, NULL once that module is gone',
+    `delivery_module_title` VARCHAR(255) COMMENT 'the name the delivery module had when it was deleted, NULL while the module is still installed',
     `status_id` INTEGER NOT NULL,
     `lang_id` INTEGER NOT NULL,
     `cart_id` INTEGER NOT NULL,
@@ -797,6 +804,7 @@ CREATE TABLE `currency`
 (
     `id` INTEGER NOT NULL AUTO_INCREMENT,
     `code` VARCHAR(45),
+    `isocode_numeric` VARCHAR(3) COMMENT 'the ISO 4217 numeric currency code',
     `symbol` VARCHAR(45),
     `format` CHAR(10),
     `rate` FLOAT,
@@ -821,6 +829,8 @@ CREATE TABLE `order_address`
     `id` INTEGER NOT NULL AUTO_INCREMENT,
     `customer_title_id` INTEGER,
     `company` VARCHAR(255),
+    `siret` VARCHAR(20),
+    `vat_number` VARCHAR(20),
     `firstname` VARCHAR(255) NOT NULL,
     `lastname` VARCHAR(255) NOT NULL,
     `address1` VARCHAR(255) NOT NULL,
@@ -905,6 +915,7 @@ CREATE TABLE `order_status`
 (
     `id` INTEGER NOT NULL AUTO_INCREMENT,
     `code` VARCHAR(45) NOT NULL,
+    `equivalent_code` VARCHAR(45),
     `color` CHAR(7),
     `position` INTEGER,
     `protected_status` TINYINT(1) DEFAULT 0,
@@ -1365,6 +1376,8 @@ CREATE TABLE `cart_address`
     `customer_title_id` INTEGER,
     `address_id` INTEGER,
     `company` VARCHAR(255),
+    `siret` VARCHAR(20),
+    `vat_number` VARCHAR(20),
     `firstname` VARCHAR(255) NOT NULL,
     `lastname` VARCHAR(255) NOT NULL,
     `address1` VARCHAR(255) NOT NULL,
@@ -1792,6 +1805,31 @@ CREATE TABLE `order_product_tax`
 ) ENGINE=InnoDB CHARACTER SET='utf8mb4' COLLATE='utf8mb4_general_ci' ROW_FORMAT=DYNAMIC;
 
 -- ---------------------------------------------------------------------
+-- order_postage_tax
+-- ---------------------------------------------------------------------
+
+DROP TABLE IF EXISTS `order_postage_tax`;
+
+CREATE TABLE `order_postage_tax`
+(
+    `id` INTEGER NOT NULL AUTO_INCREMENT,
+    `order_id` INTEGER NOT NULL,
+    `title` VARCHAR(255) NOT NULL COMMENT 'the tax rule this share of the postage follows, frozen the way postage_tax_rule_title is',
+    `description` LONGTEXT,
+    `untaxed_amount` DECIMAL(16,6) DEFAULT 0.000000 NOT NULL COMMENT 'the share of the untaxed postage this rule applies to',
+    `amount` DECIMAL(16,6) DEFAULT 0.000000 NOT NULL COMMENT 'the tax due on that share',
+    `created_at` DATETIME,
+    `updated_at` DATETIME,
+    PRIMARY KEY (`id`),
+    INDEX `idx_order_postage_tax_order_id` (`order_id`),
+    CONSTRAINT `fk_order_postage_tax_order_id`
+        FOREIGN KEY (`order_id`)
+        REFERENCES `order` (`id`)
+        ON UPDATE RESTRICT
+        ON DELETE CASCADE
+) ENGINE=InnoDB CHARACTER SET='utf8mb4' COLLATE='utf8mb4_general_ci' ROW_FORMAT=DYNAMIC;
+
+-- ---------------------------------------------------------------------
 -- newsletter
 -- ---------------------------------------------------------------------
 
@@ -2041,7 +2079,7 @@ CREATE TABLE `form_firewall`
 (
     `id` INTEGER NOT NULL AUTO_INCREMENT,
     `form_name` VARCHAR(255) NOT NULL,
-    `ip_address` VARCHAR(15) NOT NULL,
+    `ip_address` VARCHAR(45) NOT NULL,
     `attempts` TINYINT DEFAULT 1,
     `created_at` DATETIME,
     `updated_at` DATETIME,
@@ -2258,6 +2296,35 @@ CREATE TABLE `product_sale_elements_product_document`
         ON UPDATE RESTRICT
         ON DELETE CASCADE,
     CONSTRAINT `fk_pse_product_document_product_document_id`
+        FOREIGN KEY (`product_document_id`)
+        REFERENCES `product_document` (`id`)
+        ON UPDATE RESTRICT
+        ON DELETE CASCADE
+) ENGINE=InnoDB CHARACTER SET='utf8mb4' COLLATE='utf8mb4_general_ci' ROW_FORMAT=DYNAMIC;
+
+-- ---------------------------------------------------------------------
+-- product_sale_elements_virtual_document
+-- ---------------------------------------------------------------------
+
+DROP TABLE IF EXISTS `product_sale_elements_virtual_document`;
+
+CREATE TABLE `product_sale_elements_virtual_document`
+(
+    `id` INTEGER NOT NULL AUTO_INCREMENT,
+    `product_sale_elements_id` INTEGER NOT NULL,
+    `product_document_id` INTEGER NOT NULL,
+    `position` INTEGER DEFAULT 1 NOT NULL,
+    `created_at` TIMESTAMP NULL,
+    `updated_at` TIMESTAMP NULL,
+    PRIMARY KEY (`id`),
+    UNIQUE INDEX `pse_virtual_document_unique_idx` (`product_sale_elements_id`, `product_document_id`),
+    INDEX `fk_pse_virtual_document_product_document_idx` (`product_document_id`),
+    CONSTRAINT `fk_pse_virtual_document_product_sale_elements_id`
+        FOREIGN KEY (`product_sale_elements_id`)
+        REFERENCES `product_sale_elements` (`id`)
+        ON UPDATE RESTRICT
+        ON DELETE CASCADE,
+    CONSTRAINT `fk_pse_virtual_document_product_document_id`
         FOREIGN KEY (`product_document_id`)
         REFERENCES `product_document` (`id`)
         ON UPDATE RESTRICT
@@ -3391,6 +3458,7 @@ CREATE TABLE `customer_version`
     `enable` TINYINT DEFAULT 0,
     `confirmation_token` VARCHAR(255),
     `confirmation_token_expires_at` DATETIME NULL,
+    `anonymized_at` DATETIME COMMENT 'when the identifying data of the account was erased, NULL as long as the account carries an identity',
     `created_at` DATETIME,
     `updated_at` DATETIME,
     `version` INTEGER DEFAULT 0 NOT NULL,
@@ -3472,11 +3540,14 @@ CREATE TABLE `order_version`
     `delivery_ref` VARCHAR(100) COMMENT 'delivery reference - usually use to identify a delivery progress on a distant delivery tracker website',
     `invoice_ref` VARCHAR(100) COMMENT 'the invoice reference',
     `discount` DECIMAL(16,6) DEFAULT 0.000000,
+    `customer_discount_rate` DECIMAL(16,6) DEFAULT 0.000000 COMMENT 'the customer discount rate, as a percentage, already included in the order products prices',
     `postage` DECIMAL(16,6) DEFAULT 0.000000 NOT NULL,
     `postage_tax` DECIMAL(16,6) DEFAULT 0.000000 NOT NULL,
     `postage_tax_rule_title` VARCHAR(255),
-    `payment_module_id` INTEGER NOT NULL,
-    `delivery_module_id` INTEGER NOT NULL,
+    `payment_module_id` INTEGER COMMENT 'the module that took the payment, NULL once that module is gone',
+    `payment_module_title` VARCHAR(255) COMMENT 'the name the payment module had when it was deleted, NULL while the module is still installed',
+    `delivery_module_id` INTEGER COMMENT 'the module that shipped the order, NULL once that module is gone',
+    `delivery_module_title` VARCHAR(255) COMMENT 'the name the delivery module had when it was deleted, NULL while the module is still installed',
     `status_id` INTEGER NOT NULL,
     `lang_id` INTEGER NOT NULL,
     `cart_id` INTEGER NOT NULL,

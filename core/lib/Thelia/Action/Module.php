@@ -14,6 +14,7 @@ declare(strict_types=1);
 
 namespace Thelia\Action;
 
+use Propel\Runtime\Connection\ConnectionInterface;
 use Propel\Runtime\Propel;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\EventDispatcher\EventDispatcherInterface;
@@ -31,11 +32,13 @@ use Thelia\Core\Event\TheliaEvents;
 use Thelia\Core\Event\UpdatePositionEvent;
 use Thelia\Core\File\Exception\FileNotFoundException;
 use Thelia\Core\Translation\Translator;
+use Thelia\Domain\DataTransfer\Service\HandlerCleaner;
 use Thelia\Domain\Module\Exception\ModuleException;
 use Thelia\Log\Tlog;
-use Thelia\Model\Base\OrderQuery;
+use Thelia\Model\LangQuery;
 use Thelia\Model\Map\ModuleTableMap;
 use Thelia\Model\ModuleQuery;
+use Thelia\Model\OrderQuery;
 use Thelia\Module\BaseModule;
 use Thelia\Module\ModuleManagement;
 use Thelia\Module\Validator\ModuleValidator;
@@ -47,8 +50,10 @@ use Thelia\Module\Validator\ModuleValidator;
  */
 class Module extends BaseAction implements EventSubscriberInterface
 {
-    public function __construct(protected ContainerInterface $container)
-    {
+    public function __construct(
+        protected ContainerInterface $container,
+        protected HandlerCleaner $handlerCleaner,
+    ) {
     }
 
     public function toggleActivation(ModuleToggleActivationEvent $event, $eventName, EventDispatcherInterface $dispatcher): void
@@ -246,24 +251,21 @@ class Module extends BaseAction implements EventSubscriberInterface
     public function delete(ModuleDeleteEvent $event, $eventName, EventDispatcherInterface $dispatcher): void
     {
         $con = Propel::getWriteConnection(ModuleTableMap::DATABASE_NAME);
-        $con->beginTransaction();
 
         if (null === $module = ModuleQuery::create()->findPk($event->getModuleId(), $con)) {
             return;
         }
+
+        $con->beginTransaction();
+
         try {
             if (null === $module->getFullNamespace()) {
                 throw new \LogicException(Translator::getInstance()->trans('Cannot instantiate module "%name%": the namespace is null. Maybe the model is not loaded ?', ['%name%' => $module->getCode()]));
             }
 
-            // If the module is referenced by an order, display a meaningful error
-            // instead of 'delete cannot delete' caused by a constraint violation.
-            // FIXME: we hav to find a way to delete modules used by order.
-            if (OrderQuery::create()->filterByDeliveryModuleId($module->getId())->count() > 0
-                || OrderQuery::create()->filterByPaymentModuleId($module->getId())->count() > 0
-            ) {
-                throw new \LogicException(Translator::getInstance()->trans('The module "%name%" is currently in use by at least one order, and can\'t be deleted.', ['%name%' => $module->getCode()]));
-            }
+            // Orders reference the module through a foreign key that forbids the
+            // deletion, so the name they display has to be kept before the row goes.
+            $this->freezeModuleOnOrders($module, $con);
 
             try {
                 if (BaseModule::IS_MANDATORY === $module->getMandatory() && false === $event->getAssumeDelete()) {
@@ -307,16 +309,47 @@ class Module extends BaseAction implements EventSubscriberInterface
                 );
             }
 
+            // The export and import tables carry no module id, so the entries the module
+            // declared are matched on the namespace of their handler class.
+            $this->handlerCleaner->removeHandlersProvidedBy((string) $module->getFullNamespace(), $con);
+
             $module->delete($con);
 
             $con->commit();
-
-            $event->setModule($module);
-            $this->cacheClear($dispatcher);
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             $con->rollBack();
 
             throw $e;
+        }
+
+        // Outside the try: these two run once the deletion is committed, so a
+        // failure there no longer reaches a rollback of a closed transaction.
+        $event->setModule($module);
+        $this->cacheClear($dispatcher);
+    }
+
+    /**
+     * An order names its payment and delivery methods through module ids, so an
+     * invoice line or an export column is resolved from the module row at render
+     * time. Write the name the module carries on the orders that used it, in the
+     * language of each order, then release the two references so the row can go.
+     */
+    private function freezeModuleOnOrders(\Thelia\Model\Module $module, ConnectionInterface $con): void
+    {
+        $moduleId = $module->getId();
+
+        foreach (LangQuery::create()->find($con) as $lang) {
+            $title = $module->setLocale($lang->getLocale())->getTitle() ?: $module->getCode();
+
+            OrderQuery::create()
+                ->filterByLangId($lang->getId())
+                ->filterByPaymentModuleId($moduleId)
+                ->update(['PaymentModuleTitle' => $title, 'PaymentModuleId' => null], $con);
+
+            OrderQuery::create()
+                ->filterByLangId($lang->getId())
+                ->filterByDeliveryModuleId($moduleId)
+                ->update(['DeliveryModuleTitle' => $title, 'DeliveryModuleId' => null], $con);
         }
     }
 
@@ -349,13 +382,27 @@ class Module extends BaseAction implements EventSubscriberInterface
 
         $oldModule = ModuleQuery::create()->findOneByFullNamespace($moduleDefinition->getNamespace());
 
-        $fs = new Filesystem();
-
         $activated = false;
+
+        // Where the new files go. A new module lands in THELIA_MODULE_DIR; an upgrade goes
+        // back where the module already lives, which may be THELIA_LOCAL_MODULE_DIR. Writing
+        // it to THELIA_MODULE_DIR instead would leave two copies of the module on disk, and
+        // Module::getModuleDir() gives the local one priority: the old code would shadow the new.
+        $modulePathNewModule = \sprintf('%s%s', THELIA_MODULE_DIR, $moduleDefinition->getCode());
 
         // check existing module
         if (null !== $oldModule) {
-            $activated = $oldModule->getActivate();
+            // The namespace is already installed: this is an upgrade, and the row is kept.
+            // Deleting it would cascade to the hooks and their positions, the configuration,
+            // the hooks the administrator switched off, the module images, the access
+            // profiles, the delivery areas and the coupon conditions carrying its id.
+            if ($oldModule->getCode() !== $moduleDefinition->getCode()) {
+                throw new ModuleException(Translator::getInstance()->trans('The module in the archive is named "%new%" but the namespace "%namespace%" is already installed as "%old%". Uninstall "%old%" before installing "%new%".', ['%new%' => $moduleDefinition->getCode(), '%old%' => $oldModule->getCode(), '%namespace%' => $moduleDefinition->getNamespace()]));
+            }
+
+            $activated = BaseModule::IS_ACTIVATED === $oldModule->getActivate();
+
+            $modulePathNewModule = $oldModule->getAbsoluteBaseDir();
 
             if ($activated) {
                 // deactivate
@@ -365,39 +412,28 @@ class Module extends BaseAction implements EventSubscriberInterface
 
                 $dispatcher->dispatch($toggleEvent, TheliaEvents::MODULE_TOGGLE_ACTIVATION);
             }
-
-            // delete
-            $modulePath = $oldModule->getAbsoluteBaseDir();
-
-            $deleteEvent = new ModuleDeleteEvent($oldModule->getId());
-
-            try {
-                $dispatcher->dispatch($deleteEvent, TheliaEvents::MODULE_DELETE);
-            } catch (\Exception $ex) {
-                // if module has not been deleted
-                if ($fs->exists($modulePath)) {
-                    throw $ex;
-                }
-            }
         }
-
-        // move new module
-        $modulePathNewModule = \sprintf('%s%s', THELIA_MODULE_DIR, $event->getModuleDefinition()->getCode());
 
         try {
-            $fs->mirror($event->getModulePath(), $modulePathNewModule);
-        } catch (IOException $ioException) {
-            if (!$fs->exists($modulePathNewModule)) {
-                throw $ioException;
-            }
-        }
+            $this->replaceModuleFiles($event->getModulePath(), $modulePathNewModule);
 
-        // Update the module
-        $moduleDescriptorFile = \sprintf('%s%s%s%s%s', $modulePathNewModule, DS, 'Config', DS, 'module.xml');
-        $eventDispatcher = $this->container->get('event_dispatcher');
-        $moduleManagement = new ModuleManagement($this->container, $eventDispatcher);
-        $file = new \SplFileInfo($moduleDescriptorFile);
-        $module = $moduleManagement->updateModule($file, $this->container);
+            // Update the module
+            $moduleDescriptorFile = \sprintf('%s%s%s%s%s', $modulePathNewModule, DS, 'Config', DS, 'module.xml');
+            $eventDispatcher = $this->container->get('event_dispatcher');
+            $moduleManagement = new ModuleManagement($this->container, $eventDispatcher);
+            $file = new \SplFileInfo($moduleDescriptorFile);
+            $module = $moduleManagement->updateModule($file, $this->container, true);
+        } catch (\Throwable $throwable) {
+            // The module was deactivated a few lines above so it could be replaced, and the
+            // replacement is not going to happen. Put the shop back where it was: a payment
+            // or delivery module left deactivated by a failed upgrade takes the checkout
+            // down, silently, while the administrator only reads that the install failed.
+            if (null !== $oldModule) {
+                $this->restoreActivation((int) $oldModule->getId(), $activated, $dispatcher);
+            }
+
+            throw $throwable;
+        }
 
         // activate if old was activated
         if ($activated) {
@@ -408,6 +444,45 @@ class Module extends BaseAction implements EventSubscriberInterface
         }
 
         $event->setModule($module);
+    }
+
+    /**
+     * Copies the files of the module being installed over the target directory.
+     */
+    private function replaceModuleFiles(string $sourcePath, string $targetPath): void
+    {
+        $fs = new Filesystem();
+
+        if (realpath($sourcePath) === realpath($targetPath)) {
+            // The module is installed from the directory it already lives in, which is what
+            // activating a dependency does. There is nothing to copy, and mirroring a
+            // directory onto itself would truncate every one of its files.
+            return;
+        }
+
+        try {
+            // 'delete' removes what the new version no longer ships and 'override' replaces
+            // files the archive dates earlier than the installed ones. The target directory
+            // is no longer wiped by the deletion of the module, so without these two the
+            // classes of the previous version would stay on disk, to be autoloaded and hooked.
+            $fs->mirror($sourcePath, $targetPath, null, ['override' => true, 'delete' => true]);
+        } catch (IOException $ioException) {
+            if (!$fs->exists($targetPath)) {
+                throw $ioException;
+            }
+        }
+    }
+
+    private function restoreActivation(int $moduleId, bool $wasActivated, EventDispatcherInterface $dispatcher): void
+    {
+        if (!$wasActivated) {
+            return;
+        }
+
+        $toggleEvent = new ModuleToggleActivationEvent($moduleId);
+        $toggleEvent->setNoCheck(true);
+
+        $dispatcher->dispatch($toggleEvent, TheliaEvents::MODULE_TOGGLE_ACTIVATION);
     }
 
     /**

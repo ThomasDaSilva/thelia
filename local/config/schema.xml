@@ -418,6 +418,7 @@
     <column defaultValue="0" name="enable" type="TINYINT" />
     <column name="confirmation_token" size="255" type="VARCHAR" />
     <column name="confirmation_token_expires_at" type="DATE" />
+    <column description="when the identifying data of the account was erased, NULL as long as the account carries an identity" name="anonymized_at" type="TIMESTAMP" />
     <foreign-key foreignTable="customer_title" name="fk_customer_customer_title_id" onDelete="RESTRICT" onUpdate="RESTRICT">
       <reference foreign="id" local="title_id" />
     </foreign-key>
@@ -436,6 +437,9 @@
     <index name="idx_email">
       <index-column name="email" />
     </index>
+    <index name="idx_customer_anonymized_at">
+      <index-column name="anonymized_at" />
+    </index>
     <behavior name="timestampable" />
     <behavior name="versionable">
       <parameter name="log_created_at" value="true" />
@@ -448,6 +452,8 @@
     <column name="customer_id" required="true" type="INTEGER" />
     <column name="title_id" required="true" type="INTEGER" />
     <column name="company" size="255" type="VARCHAR" />
+    <column name="siret" size="20" type="VARCHAR" />
+    <column name="vat_number" size="20" type="VARCHAR" />
     <column name="firstname" required="true" size="255" type="VARCHAR" />
     <column name="lastname" required="true" size="255" type="VARCHAR" />
     <column name="address1" required="true" size="255" type="VARCHAR" />
@@ -618,11 +624,14 @@
     <column description="delivery reference - usually use to identify a delivery progress on a distant delivery tracker website" name="delivery_ref" size="100" type="VARCHAR" />
     <column description="the invoice reference" name="invoice_ref" size="100" type="VARCHAR" />
     <column defaultValue="0.000000" name="discount" scale="6" size="16" type="DECIMAL" />
+    <column defaultValue="0.000000" description="the customer discount rate, as a percentage, already included in the order products prices" name="customer_discount_rate" scale="6" size="16" type="DECIMAL" />
     <column defaultValue="0.000000" name="postage" required="true" scale="6" size="16" type="DECIMAL" />
     <column defaultValue="0.000000" name="postage_tax" required="true" scale="6" size="16" type="DECIMAL" />
     <column name="postage_tax_rule_title" size="255" type="VARCHAR" />
-    <column name="payment_module_id" required="true" type="INTEGER" />
-    <column name="delivery_module_id" required="true" type="INTEGER" />
+    <column description="the module that took the payment, NULL once that module is gone" name="payment_module_id" type="INTEGER" />
+    <column description="the name the payment module had when it was deleted, NULL while the module is still installed" name="payment_module_title" size="255" type="VARCHAR" />
+    <column description="the module that shipped the order, NULL once that module is gone" name="delivery_module_id" type="INTEGER" />
+    <column description="the name the delivery module had when it was deleted, NULL while the module is still installed" name="delivery_module_title" size="255" type="VARCHAR" />
     <column name="status_id" required="true" type="INTEGER" />
     <column name="lang_id" required="true" type="INTEGER" />
     <column name="cart_id" required="true" type="INTEGER" />
@@ -693,6 +702,7 @@
     <column autoIncrement="true" name="id" primaryKey="true" required="true" type="INTEGER" />
     <column name="name" size="45" type="VARCHAR" />
     <column name="code" size="45" type="VARCHAR" />
+    <column description="the ISO 4217 numeric currency code" name="isocode_numeric" size="3" type="VARCHAR" />
     <column name="symbol" size="45" type="VARCHAR" />
     <column name="format" size="10" type="CHAR" />
     <column name="rate" type="FLOAT" />
@@ -714,6 +724,8 @@
     <column autoIncrement="true" name="id" primaryKey="true" required="true" type="INTEGER" />
     <column name="customer_title_id" type="INTEGER" />
     <column name="company" size="255" type="VARCHAR" />
+    <column name="siret" size="20" type="VARCHAR" />
+    <column name="vat_number" size="20" type="VARCHAR" />
     <column name="firstname" required="true" size="255" type="VARCHAR" />
     <column name="lastname" required="true" size="255" type="VARCHAR" />
     <column name="address1" required="true" size="255" type="VARCHAR" />
@@ -778,6 +790,7 @@
   <table name="order_status" namespace="Thelia\Model">
     <column autoIncrement="true" name="id" primaryKey="true" required="true" type="INTEGER" />
     <column name="code" required="true" size="45" type="VARCHAR" />
+    <column name="equivalent_code" size="45" type="VARCHAR" />
     <column name="color" size="7" type="CHAR" />
     <column name="position" type="INTEGER" />
     <column defaultValue="0" name="protected_status" type="BOOLEAN" />
@@ -1157,6 +1170,8 @@
     <column name="customer_title_id" type="INTEGER" />
     <column name="address_id" type="INTEGER" />
     <column name="company" size="255" type="VARCHAR" />
+    <column name="siret" size="20" type="VARCHAR" />
+    <column name="vat_number" size="20" type="VARCHAR" />
     <column name="firstname" required="true" size="255" type="VARCHAR" />
     <column name="lastname" required="true" size="255" type="VARCHAR" />
     <column name="address1" required="true" size="255" type="VARCHAR" />
@@ -1504,6 +1519,21 @@
     </index>
     <behavior name="timestampable" />
   </table>
+  <table name="order_postage_tax" namespace="Thelia\Model">
+    <column autoIncrement="true" name="id" primaryKey="true" required="true" type="INTEGER" />
+    <column name="order_id" required="true" type="INTEGER" />
+    <column description="the tax rule this share of the postage follows, frozen the way postage_tax_rule_title is" name="title" required="true" size="255" type="VARCHAR" />
+    <column name="description" type="CLOB" />
+    <column defaultValue="0.000000" description="the share of the untaxed postage this rule applies to" name="untaxed_amount" required="true" scale="6" size="16" type="DECIMAL" />
+    <column defaultValue="0.000000" description="the tax due on that share" name="amount" required="true" scale="6" size="16" type="DECIMAL" />
+    <foreign-key foreignTable="order" name="fk_order_postage_tax_order_id" onDelete="CASCADE" onUpdate="RESTRICT">
+      <reference foreign="id" local="order_id" />
+    </foreign-key>
+    <index name="idx_order_postage_tax_order_id">
+      <index-column name="order_id" />
+    </index>
+    <behavior name="timestampable" />
+  </table>
   <table name="newsletter" namespace="Thelia\Model">
     <column autoIncrement="true" name="id" primaryKey="true" required="true" type="INTEGER" />
     <column name="email" required="true" size="255" type="VARCHAR" />
@@ -1681,7 +1711,7 @@
   <table name="form_firewall" namespace="Thelia\Model">
     <column autoIncrement="true" name="id" primaryKey="true" required="true" type="INTEGER" />
     <column name="form_name" required="true" size="255" type="VARCHAR" />
-    <column name="ip_address" required="true" size="15" type="VARCHAR" />
+    <column name="ip_address" required="true" size="45" type="VARCHAR" />
     <column defaultValue="1" name="attempts" type="TINYINT" />
     <index name="idx_form_firewall_form_name">
       <index-column name="form_name" />
@@ -1858,6 +1888,26 @@
     <index name="fk_pse_product_document_product_sale_elem_idx">
       <index-column name="product_sale_elements_id" />
     </index>
+  </table>
+  <table name="product_sale_elements_virtual_document" namespace="Thelia\Model">
+    <column autoIncrement="true" name="id" primaryKey="true" required="true" type="INTEGER" />
+    <column name="product_sale_elements_id" required="true" type="INTEGER" />
+    <column name="product_document_id" required="true" type="INTEGER" />
+    <column defaultValue="1" name="position" required="true" type="INTEGER" />
+    <foreign-key foreignTable="product_sale_elements" name="fk_pse_virtual_document_product_sale_elements_id" onDelete="CASCADE" onUpdate="RESTRICT">
+      <reference foreign="id" local="product_sale_elements_id" />
+    </foreign-key>
+    <foreign-key foreignTable="product_document" name="fk_pse_virtual_document_product_document_id" onDelete="CASCADE" onUpdate="RESTRICT">
+      <reference foreign="id" local="product_document_id" />
+    </foreign-key>
+    <unique name="pse_virtual_document_unique_idx">
+      <unique-column name="product_sale_elements_id" />
+      <unique-column name="product_document_id" />
+    </unique>
+    <index name="fk_pse_virtual_document_product_document_idx">
+      <index-column name="product_document_id" />
+    </index>
+    <behavior name="timestampable" />
   </table>
   <table name="hook" namespace="Thelia\Model">
     <column autoIncrement="true" name="id" primaryKey="true" required="true" type="INTEGER" />

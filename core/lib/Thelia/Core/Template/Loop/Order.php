@@ -24,7 +24,7 @@ use Thelia\Core\Template\Element\PropelSearchLoopInterface;
 use Thelia\Core\Template\Element\SearchLoopInterface;
 use Thelia\Core\Template\Loop\Argument\Argument;
 use Thelia\Core\Template\Loop\Argument\ArgumentCollection;
-use Thelia\Domain\Taxation\TaxEngine\Calculator;
+use Thelia\Domain\Taxation\TaxEngine\TaxCalculatorResolverTrait;
 use Thelia\Model\ConfigQuery;
 use Thelia\Model\CustomerQuery;
 use Thelia\Model\Map\CustomerTableMap;
@@ -57,6 +57,8 @@ use Thelia\Type\TypeCollection;
  */
 class Order extends BaseLoop implements SearchLoopInterface, PropelSearchLoopInterface
 {
+    use TaxCalculatorResolverTrait;
+
     protected $countable = true;
     protected $timestampable = true;
     protected $versionable = false;
@@ -335,10 +337,10 @@ class Order extends BaseLoop implements SearchLoopInterface, PropelSearchLoopInt
             if ($order->getId() <= $lastLegacyOrderId) {
                 $discountWithoutTax = $order->getDiscount();
             } else {
-                $discountWithoutTax = Calculator::getUntaxedOrderDiscount($order);
+                $discountWithoutTax = $this->createTaxCalculator()->computeUntaxedOrderDiscount($order);
             }
 
-            $hasVirtualDownload = $order->hasVirtualProduct();
+            $hasVirtualDownload = $order->hasVirtualProductWithDocument();
 
             $loopResultRow = new LoopResultRow($order);
             $loopResultRow
@@ -359,13 +361,16 @@ class Order extends BaseLoop implements SearchLoopInterface, PropelSearchLoopInt
                 ->set('POSTAGE_UNTAXED', $order->getUntaxedPostage())
                 ->set('POSTAGE_TAX_RULE_TITLE', $order->getPostageTaxRuleTitle())
                 ->set('PAYMENT_MODULE', $order->getPaymentModuleId())
+                ->set('PAYMENT_MODULE_TITLE', $order->getPaymentModuleTitle())
                 ->set('DELIVERY_MODULE', $order->getDeliveryModuleId())
+                ->set('DELIVERY_MODULE_TITLE', $order->getDeliveryModuleTitle())
                 ->set('STATUS', $order->getStatusId())
                 ->set('STATUS_CODE', $order->getOrderStatus()->getCode())
                 ->set('LANG', $order->getLangId())
                 ->set('DISCOUNT', $order->getDiscount())
                 ->set('DISCOUNT_WITHOUT_TAX', $discountWithoutTax)
                 ->set('DISCOUNT_TAX', $order->getDiscount() - $discountWithoutTax)
+                ->set('CUSTOMER_DISCOUNT_RATE', (float) $order->getCustomerDiscountRate())
                 ->set('TOTAL_ITEMS_TAX', $itemsTax)
                 ->set('TOTAL_ITEMS_AMOUNT', $itemsAmount - $itemsTax)
                 ->set('TOTAL_TAXED_ITEMS_AMOUNT', $itemsAmount)

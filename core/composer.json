@@ -9,7 +9,7 @@
         "wiki": "http://doc.thelia.net"
     },
     "require": {
-        "php": ">= 8.3",
+        "php": ">=8.3 <9.0",
 
         "ext-curl": "*",
         "ext-intl": "*",
@@ -17,7 +17,7 @@
         "ext-pdo": "*",
 
         "composer/composer": "^2.9",
-        "composer/installers": "~1.0",
+        "composer/installers": "^1.0 || ^2.0",
 
         "api-platform/symfony": "^4.3",
         "lexik/jwt-authentication-bundle": "^3.0",
@@ -60,6 +60,7 @@
         "symfony/property-access": "7.4.*",
         "symfony/property-info": "7.4.*",
         "symfony/psr-http-message-bridge": "^7.4",
+        "symfony/rate-limiter": "7.4.*",
         "symfony/routing": "7.4.*",
         "symfony/runtime": "7.4.*",
         "symfony/security-bundle": "7.4.*",

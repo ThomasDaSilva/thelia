@@ -23,6 +23,7 @@ use Thelia\Core\HttpFoundation\Request as TheliaRequest;
 use Thelia\Core\TheliaKernel;
 use Thelia\Core\Translation\Translator;
 use Thelia\Tools\URL;
+use Twig\Environment;
 
 /**
  * Base class for HTTP integration tests.
@@ -66,6 +67,17 @@ abstract class WebIntegrationTestCase extends WebTestCase
 
         $container = static::getContainer();
 
+        // Render pages the way production renders them. The Symfony skeleton
+        // turns on Twig's strict_variables in the test environment, where a
+        // theme reading an optional variable it never defines raises a
+        // RuntimeError instead of resolving to null. Every themed page then
+        // answers a 500 that says nothing about the page itself, and a smoke
+        // test can only tolerate that instead of asserting a 200.
+        $twig = $container->has('twig') ? $container->get('twig') : null;
+        if ($twig instanceof Environment) {
+            $twig->disableStrictVariables();
+        }
+
         // Initialize singletons that business code accesses statically.
         // The try/catch mirrors IntegrationTestCase so a detached kernel
         // does not leave a stale instance behind.
@@ -96,6 +108,72 @@ abstract class WebIntegrationTestCase extends WebTestCase
         $this->connection = null;
 
         parent::tearDown();
+    }
+
+    /**
+     * Asserts that a page of the installed theme is served with a 200.
+     *
+     * Exceptions are surfaced instead of being turned into a 500 error page, so
+     * a failure names the template and the line that broke rather than reporting
+     * "failed asserting that 500 is 200".
+     *
+     * One outcome is not a defect: a theme installed by Composer ships no built
+     * assets, and rendering reads them — the Encore entrypoints file, or the
+     * vendor assets AssetMapper expects under the theme. The core CI builds
+     * neither, so that single failure is reported as a skipped test. Everything
+     * else — a broken template, a controller error, an unexpected status — fails.
+     */
+    protected function assertPageRenders(string $url): void
+    {
+        $this->client->catchExceptions(false);
+
+        try {
+            $this->client->request('GET', $url);
+        } catch (\Throwable $failure) {
+            if (!self::isMissingAssetBuild($failure)) {
+                throw $failure;
+            }
+
+            self::markTestSkipped(\sprintf(
+                '"%s" cannot be rendered: the theme assets are not built (importmap:install, tailwind:build, sass:build).',
+                $url,
+            ));
+        } finally {
+            $this->client->catchExceptions(true);
+        }
+
+        self::assertSame(
+            200,
+            $this->client->getResponse()->getStatusCode(),
+            \sprintf('"%s" must be served with a 200.', $url),
+        );
+    }
+
+    /**
+     * True when the whole asset build is missing. An entry missing from a built
+     * manifest raises a different error and stays a failure.
+     */
+    private static function isMissingAssetBuild(\Throwable $failure): bool
+    {
+        // A theme builds its assets with Encore, which reads an entrypoints file; with
+        // AssetMapper, which reads the vendor assets `importmap:install` writes into the
+        // theme; or with sass-bundle, which serves a stylesheet that only exists once
+        // `sass:build` ran. All are produced by the theme build, never by the core.
+        $missingBuildMessages = [
+            'Could not find the entrypoints file',
+            'vendor asset is missing',
+            'run php bin/console sass:build',
+        ];
+
+        for ($cause = $failure; null !== $cause; $cause = $cause->getPrevious()) {
+            foreach ($missingBuildMessages as $missingBuildMessage) {
+                if (str_contains($cause->getMessage(), $missingBuildMessage)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /**

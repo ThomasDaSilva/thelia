@@ -17,6 +17,7 @@ namespace Thelia\Domain\DataTransfer\Export\Type;
 use Propel\Runtime\ActiveQuery\ModelCriteria;
 use Propel\Runtime\Propel;
 use Thelia\Domain\DataTransfer\Export\JsonFileAbstractExport;
+use Thelia\Model\ConfigQuery;
 
 /**
  * Class OrderExport.
@@ -28,6 +29,17 @@ class OrderExport extends JsonFileAbstractExport
 {
     public const FILE_NAME = 'order';
     public const USE_RANGE_DATE = true;
+
+    /**
+     * Orders placed before Thelia 2.4 were totalled without any rounding at all.
+     * ConfigQuery has no constant for it: it is not a mode a shop can be set to,
+     * only a state some rows are frozen in.
+     */
+    private const ROUNDING_MODE_LEGACY = 0;
+
+    private const UNIT_PRICE = 'IF(order_product.was_in_promo = 1, order_product.promo_price, order_product.price)';
+
+    private const UNIT_TAX = 'IF(order_product.was_in_promo, order_product_tax.promo_amount, order_product_tax.amount)';
 
     protected array $orderAndAliases = [
         'order_ref' => 'ref',
@@ -54,7 +66,7 @@ class OrderExport extends JsonFileAbstractExport
         'delivery_address_address3' => 'delivery_address_3',
         'delivery_address_zipcode' => 'delivery_zip_code',
         'delivery_address_city' => 'delivery_city',
-        'delivery_country_i18n_title' => 'invoice_country',
+        'delivery_country_i18n_title' => 'delivery_country',
         'delivery_address_phone' => 'delivery_phone',
         'invoice_address_customer_title_long' => 'invoice_title',
         'invoice_address_company' => 'invoice_company',
@@ -90,30 +102,15 @@ class OrderExport extends JsonFileAbstractExport
                     `order`.created_at as "order_created_at",
                     customer.ref as "customer_ref",
                     ROUND(`order`.discount, 2) as order_discount,
-                    order_coupon.code as order_coupon_code,
+                    '.$this->couponCodes().' as order_coupon_code,
                     ROUND(`order`.postage, 2) as order_postage,
                     `order`.postage_tax as "order_postage_tax",
-                    ROUND(`order`.postage_tax_rule_title,2) as "order_postage_tax_rule_title",
-                    SUM(ROUND(order_product.quantity * IF(order_product.was_in_promo = 1, order_product.promo_price, order_product.price), 2) ) as order_total_price,
-                    SUM(
-                        ROUND(
-                            order_product.quantity * (
-                                IF(order_product.was_in_promo = 1, order_product.promo_price, order_product.price)
-                                +
-                                (
-                                    SELECT
-                                        COALESCE(SUM(IF(order_product.was_in_promo, order_product_tax.promo_amount, order_product_tax.amount)), 0)
-                                    FROM
-                                        order_product_tax
-                                    WHERE
-                                        order_product_tax.order_product_id = order_product.id
-                                )
-                            ), 2
-                        )
-                    ) as order_total_taxed_price,
-                    delivery_module.title as "delivery_module_title",
+                    `order`.postage_tax_rule_title as "order_postage_tax_rule_title",
+                    '.$this->orderTotal(taxed: false).' as order_total_price,
+                    '.$this->orderTotal(taxed: true).' as order_total_taxed_price,
+                    COALESCE(delivery_module.title, `order`.delivery_module_title) as "delivery_module_title",
                     `order`.delivery_ref as "order_delivery_ref",
-                    payment_module.title as "payment_module_title",
+                    COALESCE(payment_module.title, `order`.payment_module_title) as "payment_module_title",
                     `order`.invoice_ref as "order_invoice_ref",
                     order_status_i18n.title as "order_status_i18n_title",
                     delivery_address_customer_title.long as "delivery_address_customer_title_long",
@@ -139,12 +136,10 @@ class OrderExport extends JsonFileAbstractExport
                     invoice_country_i18n.title as "invoice_country_i18n_title",
                     invoice_address.phone as "invoice_address_phone",
                     currency.code as "currency_code",
-                    order_product_tax.title as "order_product_tax_title"
+                    '.$this->taxTitles().' as "order_product_tax_title"
                 FROM `order`
                 LEFT JOIN customer ON customer.id = `order`.customer_id
                 LEFT JOIN order_product ON order_product.order_id = `order`.id
-                LEFT JOIN order_product_tax ON order_product_tax.order_product_id = order_product.id
-                LEFT JOIN order_coupon ON order_coupon.order_id = `order`.id
                 LEFT JOIN `module_i18n` as delivery_module ON delivery_module.id = `order`.delivery_module_id AND delivery_module.locale = :locale
                 LEFT JOIN `module_i18n` as payment_module ON payment_module.id = `order`.payment_module_id AND payment_module.locale = :locale
                 LEFT JOIN order_status_i18n ON order_status_i18n.id = `order`.status_id AND order_status_i18n.locale = :locale
@@ -155,7 +150,7 @@ class OrderExport extends JsonFileAbstractExport
                 LEFT JOIN country_i18n as delivery_country_i18n ON delivery_country_i18n.id = delivery_address.country_id AND delivery_country_i18n.locale = :locale
                 LEFT JOIN country_i18n as invoice_country_i18n ON invoice_country_i18n.id = invoice_address.country_id AND invoice_country_i18n.locale = :locale
                 LEFT JOIN currency ON currency.id = order.currency_id
-                WHERE `order`.created_at >= :start AND `order`.created_at <= :end
+                '.$this->buildDateRangeCondition().'
                 GROUP BY `order`.id
                 ORDER BY `order`.created_at DESC
             ) as tmp
@@ -163,10 +158,140 @@ class OrderExport extends JsonFileAbstractExport
 
         $stmt = $con->prepare($query);
         $stmt->bindValue('locale', $locale);
-        $stmt->bindValue('start', $this->rangeDate['start']->format('Y-m-d H:i:s'));
-        $stmt->bindValue('end', $this->rangeDate['end']->format('Y-m-d H:i:s'));
+        $stmt->bindValue('legacy_rounding_pivot', (int) ConfigQuery::read('last_legacy_rounding_order_id', 0), \PDO::PARAM_INT);
+        $stmt->bindValue('sum_of_roundings_pivot', (int) ConfigQuery::read('last_sum_of_roundings_order_id', 0), \PDO::PARAM_INT);
+
+        foreach ($this->getDateRangeBounds() as $bound => $date) {
+            $stmt->bindValue($bound, $date->format('Y-m-d H:i:s'));
+        }
+
         $stmt->execute();
 
         return $this->getDataJsonCache($stmt, 'order');
+    }
+
+    /**
+     * The codes of the coupons the order carries, in the single `coupons`
+     * column the export has always had.
+     *
+     * A top-level join would repeat every line of the order once per coupon,
+     * and the totals are summed over those lines: an order paid with two
+     * coupons exported twice the amount it was invoiced. Reading the codes in
+     * a subquery keeps one row per line, and an order carrying several coupons
+     * now lists them all instead of whichever one the database happened to
+     * hand back.
+     */
+    private function couponCodes(): string
+    {
+        return "
+                    (
+                        SELECT GROUP_CONCAT(order_coupon.code ORDER BY order_coupon.id SEPARATOR ', ')
+                        FROM order_coupon
+                        WHERE order_coupon.order_id = `order`.id
+                    )";
+    }
+
+    /**
+     * The tax labels the order bears, listed the same way and for the same
+     * reason: a line taxed twice reached the totals twice. The column has
+     * carried the label rather than an amount since Thelia 2 — the amount is
+     * what `order_total_tax` states.
+     */
+    private function taxTitles(): string
+    {
+        return "
+                    (
+                        SELECT GROUP_CONCAT(DISTINCT order_product_tax.title ORDER BY order_product_tax.title SEPARATOR ', ')
+                        FROM order_product_tax
+                        INNER JOIN order_product as taxed_product ON taxed_product.id = order_product_tax.order_product_id
+                        WHERE taxed_product.order_id = `order`.id
+                    )";
+    }
+
+    /**
+     * Totals the lines of an order the way it was invoiced.
+     *
+     * One query covers the whole order history, and the rule an order was
+     * charged with depends on when it was placed: an order frozen by the 2.4
+     * upgrade was totalled without any rounding, an order placed before a shop
+     * switched to rounding of sums keeps the historical rule, and the rest
+     * follow the shop. Thelia\Model\Order::getTotalAmount() is the reference the
+     * three branches mirror — an export that disagrees with it states an amount
+     * the customer was never charged.
+     */
+    private function orderTotal(bool $taxed): string
+    {
+        return '
+                    SUM(
+                        CASE
+                            WHEN `order`.id <= :legacy_rounding_pivot THEN '.$this->lineTotal(self::ROUNDING_MODE_LEGACY, $taxed).'
+                            WHEN `order`.id <= :sum_of_roundings_pivot THEN '.$this->lineTotal(ConfigQuery::ROUNDING_MODE_SUM_OF_ROUNDINGS, $taxed).'
+                            ELSE '.$this->lineTotal(ConfigQuery::getOrderRoundingMode(), $taxed).'
+                        END
+                    )';
+    }
+
+    /**
+     * One line total, rounded where the given mode says to round: on the unit
+     * amounts under sum of roundings, on the line total under rounding of sums,
+     * nowhere at all for an order frozen by the 2.4 upgrade.
+     */
+    private function lineTotal(int $roundingMode, bool $taxed): string
+    {
+        $roundUnitAmounts = ConfigQuery::ROUNDING_MODE_SUM_OF_ROUNDINGS === $roundingMode;
+
+        $unitAmount = $roundUnitAmounts ? 'ROUND('.self::UNIT_PRICE.', 2)' : self::UNIT_PRICE;
+
+        if ($taxed) {
+            $unitTax = $roundUnitAmounts ? 'ROUND('.self::UNIT_TAX.', 2)' : self::UNIT_TAX;
+
+            $unitAmount = '('.$unitAmount.' + (
+                                SELECT COALESCE(SUM('.$unitTax.'), 0)
+                                FROM order_product_tax
+                                WHERE order_product_tax.order_product_id = order_product.id
+                            ))';
+        }
+
+        $lineTotal = 'order_product.quantity * '.$unitAmount;
+
+        return ConfigQuery::ROUNDING_MODE_ROUNDING_OF_SUMS === $roundingMode
+            ? 'ROUND('.$lineTotal.', 2)'
+            : $lineTotal;
+    }
+
+    /**
+     * A date range is optional: without one, the export covers every order.
+     * A single bound is honoured on its own, so `--start` alone exports
+     * everything since that date.
+     *
+     * @return array<string, \DateTimeInterface>
+     */
+    private function getDateRangeBounds(): array
+    {
+        $bounds = [];
+
+        foreach (['start', 'end'] as $bound) {
+            if (($this->rangeDate[$bound] ?? null) instanceof \DateTimeInterface) {
+                $bounds[$bound] = $this->rangeDate[$bound];
+            }
+        }
+
+        return $bounds;
+    }
+
+    private function buildDateRangeCondition(): string
+    {
+        $comparisons = ['start' => '>=', 'end' => '<='];
+        $conditions = [];
+
+        foreach ($this->getDateRangeBounds() as $bound => $date) {
+            $conditions[] = '`order`.created_at '.$comparisons[$bound].' :'.$bound;
+        }
+
+        if ($conditions === []) {
+            return '';
+        }
+
+        return 'WHERE '.implode(' AND ', $conditions);
     }
 }

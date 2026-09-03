@@ -25,8 +25,33 @@ use Thelia\Model\Base\ConfigQuery as BaseConfigQuery;
  */
 class ConfigQuery extends BaseConfigQuery
 {
+    /**
+     * Every unit price is rounded to the cent before being multiplied by the
+     * quantity. This is the historical Thelia behaviour and stays the default.
+     */
+    public const ROUNDING_MODE_SUM_OF_ROUNDINGS = 1;
+
+    /**
+     * The unit price is multiplied by the quantity at full precision, and only
+     * the resulting line total is rounded to the cent. Shops selling by weight
+     * or by volume need this: a price stored per gram or per millilitre is
+     * meaningless once rounded to the cent.
+     */
+    public const ROUNDING_MODE_ROUNDING_OF_SUMS = 2;
+
     protected static $booted = false;
+
+    /**
+     * Stored values only, never the environment overrides applied on top of them:
+     * this map is handed to a cache shared by every process of the shop, so a
+     * variable set for one process must not end up being read by the next one.
+     *
+     * @var array<string, string|null>
+     */
     protected static $cache = [];
+
+    /** @var array<string, string> */
+    private static array $envNames = [];
 
     /**
      * @internal
@@ -49,21 +74,64 @@ class ConfigQuery extends BaseConfigQuery
     }
 
     /**
+     * @internal
+     *
+     * The whole table, name => stored value. It is small enough to load in one
+     * go and to hand to {@see initCache()} as an authoritative snapshot: every
+     * name absent from the result has no row in the table at all. Environment
+     * overrides are deliberately left out, {@see read()} applies them.
+     *
+     * @return array<string, string|null>
+     */
+    public static function findAllAsMap(): array
+    {
+        $configs = [];
+
+        foreach (self::create()->find() as $config) {
+            $configs[$config->getName()] = $config->getStoredValue();
+        }
+
+        return $configs;
+    }
+
+    /**
      * Find a config variable and return the value or default value if not founded.
      *
      * Use this method for better performance, a cache is created for each variable already searched
      */
     public static function read(string $search, $default = null, bool $ignoreCache = false)
     {
-        if ($ignoreCache || !self::$booted || !\array_key_exists($search, self::$cache)) {
-            $model = self::create()->filterByName($search)->findOneOrCreate();
-
-            // The default only applies to a variable that does not exist yet: a stored
-            // '0' or '' is a value, and the cached path returns it as such.
-            self::$cache[$search] = $model->getValue() ?? $default;
+        if ($ignoreCache) {
+            // findOneOrCreate() puts the name in the cache, so the lookup below finds it.
+            self::$cache[$search] = self::create()->filterByName($search)->findOneOrCreate()->getStoredValue();
+        } elseif (!self::$booted) {
+            // Nothing warmed the cache yet (this can run before
+            // ConfigCacheService gets a chance to, e.g. a debug logger reading
+            // its own config while Propel itself is still being wired up).
+            // Load the whole table once instead of paying for every distinct
+            // name read from here on, one row at a time.
+            self::initCache(self::findAllAsMap());
         }
 
-        return self::$cache[$search];
+        if (!\array_key_exists($search, self::$cache)) {
+            // The snapshot above is exhaustive: a name missing from it has no
+            // row in the table, it is not a lookup that has not run yet.
+            return $default;
+        }
+
+        // An environment variable wins over the stored value, but only for the process
+        // that has it set. Applying it here rather than caching the result is what
+        // keeps the cached snapshot readable by a process started with another
+        // environment, and this one readable by no one else.
+        $envName = self::$envNames[$search] ??= Config::getEnvNameFor($search);
+
+        if (isset($_ENV[$envName])) {
+            return (string) $_ENV[$envName];
+        }
+
+        // The default only applies to a variable that does not exist yet: a stored
+        // '0' or '' is a value, and it is returned as such.
+        return self::$cache[$search] ?? $default;
     }
 
     public static function write($configName, $value, $secured = null, $hidden = null): void
@@ -86,7 +154,7 @@ class ConfigQuery extends BaseConfigQuery
         $config->setValue($value !== null ? (string) $value : '');
         $config->save();
 
-        self::$cache[$configName] = $config->getValue();
+        self::$cache[$configName] = $config->getStoredValue();
     }
 
     public static function getConfiguredShopUrl()
@@ -152,6 +220,41 @@ class ConfigQuery extends BaseConfigQuery
         $value = self::read('store_country');
 
         return null === $value ? null : (int) $value;
+    }
+
+    public static function getStoreSiret(): string
+    {
+        return (string) self::read('store_siret', '');
+    }
+
+    public static function getStoreVatIntracom(): string
+    {
+        return (string) self::read('store_vat_intracom', '');
+    }
+
+    public static function getStoreApeCode(): string
+    {
+        return (string) self::read('store_ape_code', '');
+    }
+
+    public static function getStoreEori(): string
+    {
+        return (string) self::read('store_eori', '');
+    }
+
+    public static function isStoreVatExempt(): bool
+    {
+        return '1' === self::read('store_vat_exempt', '0');
+    }
+
+    public static function isStoreRegistrationExempt(): bool
+    {
+        return '1' === self::read('store_registration_exempt', '0');
+    }
+
+    public static function getStoreLegalMentions(): string
+    {
+        return (string) self::read('store_legal_mentions', '');
     }
 
     public static function getNotifyNewsletterSubscription(): bool
@@ -331,6 +434,56 @@ class ConfigQuery extends BaseConfigQuery
     public static function getMinimuAdminPasswordLength()
     {
         return self::read('minimum_admin_password_length', 4);
+    }
+
+    /**
+     * Orders placed before Thelia 2.4 were totalled without any rounding at all.
+     * Their amount is frozen: reading them back with a newer rule would restate
+     * an invoice the customer has already paid.
+     */
+    public static function isOrderWithLegacyRounding(int $orderId): bool
+    {
+        return $orderId <= (int) self::read('last_legacy_rounding_order_id', 0);
+    }
+
+    /**
+     * The last order that keeps a sum-of-roundings total whatever
+     * order_rounding_mode says. A shop switching to rounding of sums writes its
+     * current maximum order id here, exactly the way the 2.4 upgrade wrote
+     * last_legacy_rounding_order_id, so that the orders already invoiced are
+     * left alone. Zero, the default, means the shop has nothing to protect.
+     */
+    public static function isOrderWithSumOfRoundings(int $orderId): bool
+    {
+        return $orderId <= (int) self::read('last_sum_of_roundings_order_id', 0);
+    }
+
+    /**
+     * Tells how a line total has to be built from a unit price and a quantity.
+     *
+     * Pass the id of a persisted order to get the mode that order was invoiced
+     * with; pass nothing for a cart, which is always priced with the mode the
+     * shop runs today.
+     *
+     * Any value other than the two known modes reads as the historical one: a
+     * typo in a configuration variable must not restate an invoice.
+     */
+    public static function getOrderRoundingMode(?int $orderId = null): int
+    {
+        if (null !== $orderId && self::isOrderWithSumOfRoundings($orderId)) {
+            return self::ROUNDING_MODE_SUM_OF_ROUNDINGS;
+        }
+
+        $configuredMode = (int) self::read('order_rounding_mode', self::ROUNDING_MODE_SUM_OF_ROUNDINGS);
+
+        return self::ROUNDING_MODE_ROUNDING_OF_SUMS === $configuredMode
+            ? self::ROUNDING_MODE_ROUNDING_OF_SUMS
+            : self::ROUNDING_MODE_SUM_OF_ROUNDINGS;
+    }
+
+    public static function isRoundingModeRoundingOfSums(?int $orderId = null): bool
+    {
+        return self::ROUNDING_MODE_ROUNDING_OF_SUMS === self::getOrderRoundingMode($orderId);
     }
 }
 

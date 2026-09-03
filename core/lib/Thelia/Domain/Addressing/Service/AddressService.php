@@ -44,6 +44,8 @@ readonly class AddressService
             'firstname' => $address->getFirstname(),
             'lastname' => $address->getLastname(),
             'company' => $address->getCompany(),
+            'siret' => $address->getSiret(),
+            'vat_number' => $address->getVatNumber(),
             'address1' => $address->getAddress1(),
             'address2' => $address->getAddress2(),
             'address3' => $address->getAddress3(),
@@ -150,6 +152,8 @@ readonly class AddressService
             $data['company'] ?? null,
             $data['is_default'] ?? false,
             isset($data['state']) ? (int) $data['state'] : null,
+            $data['siret'] ?? null,
+            $data['vat_number'] ?? null,
         );
     }
 
@@ -165,8 +169,13 @@ readonly class AddressService
             ?? $request->query->get('addressId');
 
         if (null === $addressId) {
-            $session = $request->getSession();
-            $addressId = $session->getSessionCart($this->dispatcher)?->getAddressDeliveryId();
+            // The cart holds a `cart_address` id, which is its own frozen copy
+            // of the address, so the customer address it was copied from has to
+            // be read through it.
+            $addressId = $request->getSession()
+                ->getSessionCart($this->dispatcher)
+                ?->getCartAddressRelatedByAddressDeliveryId()
+                ?->getAddressId();
         }
 
         if (null !== $addressId) {

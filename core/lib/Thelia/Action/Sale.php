@@ -28,7 +28,8 @@ use Thelia\Core\Event\Sale\SaleDeleteEvent;
 use Thelia\Core\Event\Sale\SaleToggleActivityEvent;
 use Thelia\Core\Event\Sale\SaleUpdateEvent;
 use Thelia\Core\Event\TheliaEvents;
-use Thelia\Domain\Taxation\TaxEngine\Calculator;
+use Thelia\Domain\Taxation\TaxEngine\TaxCalculatorFactoryInterface;
+use Thelia\Domain\Taxation\TaxEngine\TaxCalculatorInterface;
 use Thelia\Model\Country as CountryModel;
 use Thelia\Model\Map\SaleTableMap;
 use Thelia\Model\ProductPriceQuery;
@@ -48,14 +49,19 @@ use Thelia\Model\SaleQuery;
  */
 class Sale extends BaseAction implements EventSubscriberInterface
 {
+    public function __construct(
+        private readonly TaxCalculatorFactoryInterface $taxCalculatorFactory,
+    ) {
+    }
+
     /**
      * Update PSE for a given product.
      *
-     * @param array      $pseList              an array of priduct sale elements
-     * @param bool       $promoStatus          true if the PSEs are on sale, false otherwise
-     * @param int        $offsetType           the offset type, see SaleModel::OFFSET_* constants
-     * @param Calculator $taxCalculator        the tax calculator
-     * @param array      $saleOffsetByCurrency an array of price offset for each currency (currency ID => offset_amount)
+     * @param array                  $pseList              an array of priduct sale elements
+     * @param bool                   $promoStatus          true if the PSEs are on sale, false otherwise
+     * @param int                    $offsetType           the offset type, see SaleModel::OFFSET_* constants
+     * @param TaxCalculatorInterface $taxCalculator        the tax calculator
+     * @param array                  $saleOffsetByCurrency an array of price offset for each currency (currency ID => offset_amount)
      *
      * @throws PropelException
      */
@@ -63,7 +69,7 @@ class Sale extends BaseAction implements EventSubscriberInterface
         array $pseList,
         bool $promoStatus,
         int $offsetType,
-        Calculator $taxCalculator,
+        TaxCalculatorInterface $taxCalculator,
         array $saleOffsetByCurrency,
         ConnectionInterface $con,
     ): void {
@@ -114,12 +120,12 @@ class Sale extends BaseAction implements EventSubscriberInterface
      */
     public function updateProductsSaleStatus(ProductSaleStatusUpdateEvent $event): void
     {
-        $taxCalculator = new Calculator();
+        $taxCalculator = $this->taxCalculatorFactory->createTaxCalculator();
 
         $sale = $event->getSale();
 
         // Get all selected product sale elements for this sale
-        if (null === $sale || null === $saleProducts = SaleProductQuery::create()->filterBySale($sale)->orderByProductId()) {
+        if (null === $sale || null === $saleProducts = SaleProductQuery::create()->filterBySale($sale)->orderByProductId()->find()) {
             return;
         }
         $saleOffsetByCurrency = $sale->getPriceOffsets();
@@ -131,13 +137,25 @@ class Sale extends BaseAction implements EventSubscriberInterface
         $con->beginTransaction();
 
         try {
+            // A product is present once per selected attribute value, so the sale status of its PSE has to be
+            // reset once and for all before processing the selection. Doing it in the loop below would discard
+            // the promo status set by the previously processed attribute values of the same product.
+            $saleProductIds = [];
+
             /** @var SaleProduct $saleProduct */
             foreach ($saleProducts as $saleProduct) {
-                // Reset all sale status on product's PSE
-                ProductSaleElementsQuery::create()
-                    ->filterByProductId($saleProduct->getProductId())
-                    ->update(['Promo' => 0], $con);
+                $saleProductIds[$saleProduct->getProductId()] = $saleProduct->getProductId();
+            }
 
+            if ([] !== $saleProductIds) {
+                // Reset all sale status on the PSE of the sale's products
+                ProductSaleElementsQuery::create()
+                    ->filterByProductId($saleProductIds, Criteria::IN)
+                    ->update(['Promo' => 0], $con);
+            }
+
+            /** @var SaleProduct $saleProduct */
+            foreach ($saleProducts as $saleProduct) {
                 $taxCalculator->load(
                     $saleProduct->getProduct($con),
                     CountryModel::getShopLocation(),
@@ -178,7 +196,7 @@ class Sale extends BaseAction implements EventSubscriberInterface
             }
 
             $con->commit();
-        } catch (PropelException $e) {
+        } catch (\Throwable $e) {
             $con->rollback();
 
             throw $e;
@@ -289,7 +307,7 @@ class Sale extends BaseAction implements EventSubscriberInterface
                 }
 
                 $con->commit();
-            } catch (PropelException $e) {
+            } catch (\Throwable $e) {
                 $con->rollback();
 
                 throw $e;
@@ -324,10 +342,10 @@ class Sale extends BaseAction implements EventSubscriberInterface
             $event->setSale($sale);
 
             $con->commit();
-        } catch (PropelException $propelException) {
+        } catch (\Throwable $throwable) {
             $con->rollback();
 
-            throw $propelException;
+            throw $throwable;
         }
     }
 
@@ -360,7 +378,7 @@ class Sale extends BaseAction implements EventSubscriberInterface
                 $event->setSale($sale);
 
                 $con->commit();
-            } catch (PropelException $e) {
+            } catch (\Throwable $e) {
                 $con->rollback();
 
                 throw $e;
@@ -390,10 +408,10 @@ class Sale extends BaseAction implements EventSubscriberInterface
                 ->update(['Promo' => 0], $con);
 
             $con->commit();
-        } catch (PropelException $propelException) {
+        } catch (\Throwable $throwable) {
             $con->rollback();
 
-            throw $propelException;
+            throw $throwable;
         }
     }
 
@@ -447,10 +465,10 @@ class Sale extends BaseAction implements EventSubscriberInterface
             }
 
             $con->commit();
-        } catch (PropelException $propelException) {
+        } catch (\Throwable $throwable) {
             $con->rollback();
 
-            throw $propelException;
+            throw $throwable;
         }
     }
 

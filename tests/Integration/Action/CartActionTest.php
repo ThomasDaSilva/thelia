@@ -21,10 +21,12 @@ use Thelia\Core\Event\Cart\CartCreateEvent;
 use Thelia\Core\Event\Cart\CartEvent;
 use Thelia\Core\Event\Cart\CartRestoreEvent;
 use Thelia\Core\Event\TheliaEvents;
+use Thelia\Core\Security\SecurityContext;
 use Thelia\Model\Cart;
 use Thelia\Model\CartItemQuery;
 use Thelia\Model\CartQuery;
 use Thelia\Model\ConfigQuery;
+use Thelia\Model\Customer;
 use Thelia\Model\ProductSaleElementsQuery;
 use Thelia\Test\ActionIntegrationTestCase;
 
@@ -68,6 +70,42 @@ final class CartActionTest extends ActionIntegrationTestCase
         self::assertNotNull($cartItem);
         self::assertSame(3.0, (float) $cartItem->getQuantity());
         self::assertSame(1, CartItemQuery::create()->filterByCartId($cart->getId())->count());
+    }
+
+    public function testAddItemTakesTheProductFromTheSaleElement(): void
+    {
+        $cart = $this->newEmptyCart();
+        $category = $this->factory->category();
+        $taxRule = $this->factory->taxRule();
+        $currency = $this->factory->currency();
+        $product = $this->factory->product($category, $taxRule, $currency, ['baseQuantity' => 100]);
+        $otherProduct = $this->factory->product($category, $taxRule, $currency, ['baseQuantity' => 100]);
+
+        // The request names another product than the one the sale element belongs to.
+        $event = $this->dispatchAddItem($cart, $otherProduct->getId(), $this->defaultPseFor($product->getId())->getId(), 1);
+
+        self::assertSame($product->getId(), $event->getCartItem()->getProductId());
+    }
+
+    public function testAddItemRefusesANonPositiveQuantity(): void
+    {
+        $cart = $this->newEmptyCart();
+        $product = $this->factory->product(
+            $this->factory->category(),
+            $this->factory->taxRule(),
+            $this->factory->currency(),
+            ['baseQuantity' => 100],
+        );
+        $pse = $this->defaultPseFor($product->getId());
+        $this->dispatchAddItem($cart, $product->getId(), $pse->getId(), 2);
+
+        try {
+            $this->dispatchAddItem($cart, $product->getId(), $pse->getId(), -5);
+            self::fail('A negative quantity must be refused');
+        } catch (\InvalidArgumentException) {
+        }
+
+        self::assertSame(2.0, (float) CartItemQuery::create()->filterByCartId($cart->getId())->findOne()->getQuantity());
     }
 
     public function testAddItemTwiceIncrementsExistingLine(): void
@@ -189,6 +227,63 @@ final class CartActionTest extends ActionIntegrationTestCase
         self::assertNotSame($cart->getToken(), $restored->getToken());
     }
 
+    public function testRestoreCurrentCartAssignsAnAnonymousCartToACustomerWithoutDiscount(): void
+    {
+        // getDiscount() maps a DECIMAL column, so "no discount" reads as the string '0.000000'.
+        $customer = $this->customerWithDiscount('0.000000');
+        $cart = $this->anonymousCartWithOneItem();
+
+        $restored = $this->restoreCartAsLoggedInCustomer($customer);
+
+        // No discount to apply: the very same cart is handed over to the customer.
+        self::assertSame($cart->getId(), $restored->getId());
+        self::assertSame($customer->getId(), $restored->getCustomerId());
+    }
+
+    public function testRestoreCurrentCartDuplicatesAnAnonymousCartForACustomerWithADiscount(): void
+    {
+        $customer = $this->customerWithDiscount('10.000000');
+        $cart = $this->anonymousCartWithOneItem();
+
+        $restored = $this->restoreCartAsLoggedInCustomer($customer);
+
+        // The discount has to be applied to the items, which requires a fresh cart.
+        self::assertNotSame($cart->getId(), $restored->getId());
+        self::assertSame($customer->getId(), $restored->getCustomerId());
+    }
+
+    public function testRestoreCurrentCartRealignsItemPricesWithTheCatalog(): void
+    {
+        $cart = $this->factory->cart();
+        $product = $this->factory->product(
+            $this->factory->category(),
+            $this->factory->taxRule(),
+            $this->factory->currency(),
+            ['baseQuantity' => 100],
+        );
+        $pse = $this->defaultPseFor($product->getId());
+        $this->dispatchAddItem($cart, $product->getId(), $pse->getId(), 1);
+
+        // The item was added while the product was on a special offer, which has since ended.
+        $item = CartItemQuery::create()->filterByCartId($cart->getId())->findOne();
+        $item->setPromo(1)->setPromoPrice('4.44')->save();
+        self::assertSame(4.44, $item->getRealPrice());
+
+        $this->mainRequest()->cookies->set(
+            ConfigQuery::read('cart.cookie_name', 'thelia_cart'),
+            $cart->getToken(),
+        );
+
+        $this->dispatch(new CartRestoreEvent(), TheliaEvents::CART_RESTORE_CURRENT);
+
+        $catalogPrice = $pse->getPricesByCurrency($cart->getCurrency(), 0);
+        $item->reload();
+
+        self::assertSame(0, (int) $item->getPromo());
+        self::assertSame((float) $catalogPrice->getPromoPrice(), (float) $item->getPromoPrice());
+        self::assertSame((float) $catalogPrice->getPrice(), $item->getRealPrice());
+    }
+
     public function testDuplicateAcceptsANullTokenWhenTheCartCookieIsDisabled(): void
     {
         $cart = $this->newEmptyCart();
@@ -208,6 +303,47 @@ final class CartActionTest extends ActionIntegrationTestCase
     private function mainRequest(): Request
     {
         return $this->getService(RequestStack::class)->getMainRequest();
+    }
+
+    private function customerWithDiscount(string $discount): Customer
+    {
+        $customer = $this->factory->customer($this->factory->customerTitle());
+        $customer->setDiscount($discount)->save();
+
+        return $customer;
+    }
+
+    /**
+     * Creates a cart that belongs to nobody, holding a single item, and
+     * points the cart cookie at it.
+     */
+    private function anonymousCartWithOneItem(): Cart
+    {
+        $cart = $this->factory->cart();
+        $product = $this->factory->product(
+            $this->factory->category(),
+            $this->factory->taxRule(),
+            $this->factory->currency(),
+            ['baseQuantity' => 100],
+        );
+        $this->dispatchAddItem($cart, $product->getId(), $this->defaultPseFor($product->getId())->getId(), 1);
+
+        $this->mainRequest()->cookies->set(
+            ConfigQuery::read('cart.cookie_name', 'thelia_cart'),
+            $cart->getToken(),
+        );
+
+        return $cart;
+    }
+
+    private function restoreCartAsLoggedInCustomer(Customer $customer): Cart
+    {
+        $this->getService(SecurityContext::class)->setCustomerUser($customer);
+
+        $event = new CartRestoreEvent();
+        $this->dispatch($event, TheliaEvents::CART_RESTORE_CURRENT);
+
+        return $event->getCart();
     }
 
     private function newEmptyCart(): Cart

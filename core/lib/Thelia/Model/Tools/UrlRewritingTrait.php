@@ -116,6 +116,11 @@ trait UrlRewritingTrait
                 ->setViewId((string) $this->getId())
                 ->setViewLocale($locale)
                 ->save();
+
+            // RewritingUrl::preInsert() sanitizes the url before storing it: accents are
+            // folded and the object id is prefixed when the result is already taken. Only
+            // the stored url resolves, so that is the one the caller must get back.
+            return (string) $rewritingUrl->getUrl();
         }
 
         return $urlFilePart;
@@ -149,6 +154,11 @@ trait UrlRewritingTrait
             ->update([
                 'View' => ConfigQuery::getObsoleteRewrittenUrlView(),
             ]);
+
+        // ModelCriteria::update() writes SQL directly and never instantiates
+        // a RewritingUrl object, so the model's postSave/postDelete hooks never
+        // run: the cache has to be cleared explicitly here.
+        URL::getInstance()->clearRewritingUrlCache();
     }
 
     /**
@@ -227,6 +237,10 @@ trait UrlRewritingTrait
         if (null !== $oldRewritingUrl = RewritingUrlQuery::create()->findOneByUrl($currentUrl)) {
             $oldRewritingUrl->setRedirected($rewritingUrl->getId())->save();
         }
+
+        // Belt and suspenders alongside RewritingUrl::postSave(): a cache entry set for
+        // this key before the url existed must not survive past the write that creates it.
+        URL::getInstance()->clearRewritingUrlCache();
 
         return $this;
     }

@@ -161,7 +161,7 @@ class Product extends BaseAction implements EventSubscriberInterface
             $this->eventDispatcher->dispatch($event, TheliaEvents::PSE_CLONE);
 
             $con->commit();
-        } catch (\Exception $exception) {
+        } catch (\Throwable $exception) {
             $con->rollBack();
 
             throw $exception;
@@ -367,11 +367,39 @@ class Product extends BaseAction implements EventSubscriberInterface
 
             $event->setProduct($product);
             $con->commit();
-        } catch (PropelException $e) {
+        } catch (\Throwable $e) {
             $con->rollBack();
 
             throw $e;
         }
+
+        $this->updateVirtualDocumentAssociation($event);
+    }
+
+    /**
+     * Store the document a virtual product is downloaded from, for the default sale element.
+     *
+     * A null or negative value means the caller does not handle the association (a product with
+     * several combinations sets it per combination), 0 removes it, and a document id sets it.
+     */
+    private function updateVirtualDocumentAssociation(ProductUpdateEvent $event): void
+    {
+        $virtualDocumentId = $event->getVirtualDocumentId();
+
+        if (null === $virtualDocumentId || (int) $virtualDocumentId < 0) {
+            return;
+        }
+
+        $defaultPse = ProductSaleElementsQuery::create()
+            ->filterByProductId($event->getProductId())
+            ->filterByIsDefault(true)
+            ->findOne();
+
+        if (null === $defaultPse) {
+            return;
+        }
+
+        $defaultPse->setVirtualDocument(0 === (int) $virtualDocumentId ? null : (int) $virtualDocumentId);
     }
 
     public function updateSeo(UpdateSeoEvent $event, $eventName, EventDispatcherInterface $dispatcher): mixed
@@ -419,7 +447,7 @@ class Product extends BaseAction implements EventSubscriberInterface
             }
 
             $con->commit();
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             $con->rollBack();
 
             throw $e;
@@ -627,7 +655,7 @@ class Product extends BaseAction implements EventSubscriberInterface
 
             // Store all the stuff !
             $con->commit();
-        } catch (\Exception $exception) {
+        } catch (\Throwable $exception) {
             $con->rollBack();
 
             throw $exception;

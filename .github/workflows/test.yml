@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: [ '8.3', '8.4' ]
+        php: [ '8.3', '8.4', '8.5' ]
     # A leaked DB transaction once kept a DDL test waiting on a metadata lock
     # until the 6-hour runner limit. A green run takes ~15 minutes; anything
     # beyond this is a hang, fail fast.
@@ -45,6 +45,30 @@ jobs:
         # bin/test-prepare (run by `composer test`) reads these to create the test
         # database, build the Propel models and generate the JWT keys.
         run: printf 'DATABASE_HOST=127.0.0.1\nDATABASE_PORT=3306\nDATABASE_USER=root\nDATABASE_PASSWORD=root\nDATABASE_NAME=test\n' > .env.test.local
+
+      - name: Install the front theme importmap vendors
+        # The Flexy theme renders its JavaScript through AssetMapper and its Composer
+        # package ships no assets/vendor/: without them the front pages cannot render
+        # and their smoke tests skip instead of asserting a 200. The vendor directory
+        # follows the active front template, which the kernel reads from the database,
+        # so the test database has to exist first — `composer ci` builds it again,
+        # idempotently. A failed download only brings the skips back, never a red job.
+        continue-on-error: true
+        run: |
+          php bin/test-prepare
+          php bin/console importmap:install --env=test
+
+      - name: Lint the YAML config and the Twig themes
+        # Runs in the test environment: booting the kernel needs the generated Propel
+        # model classes, which bin/test-prepare builds (rerun here, it is idempotent,
+        # in case the best-effort step above did not reach it). The back-office
+        # default-twig theme is left out on purpose: its `safe_hook` Twig function is
+        # unknown to the bare console environment, so a plain lint reports false errors
+        # on it; that theme is covered by the phpstan-botwig job instead.
+        run: |
+          php bin/test-prepare
+          php bin/console lint:yaml config/ --env=test
+          php bin/console lint:twig templates/frontOffice templates/email templates/pdf core/lib/Thelia/Resources/views --env=test
 
       - name: Run CI (cs-diff, phpstan, the five PHPUnit suites)
         run: composer ci
