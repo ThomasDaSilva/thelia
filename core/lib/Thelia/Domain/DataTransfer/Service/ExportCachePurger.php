@@ -23,31 +23,43 @@ class ExportCachePurger
     private const EXPORT_CACHE_MAX_AGE_DAYS = 1;
 
     /**
+     * Deletes the export files older than a day, and tells how many went. A link in the
+     * folder goes by itself, never the file it points to.
+     *
      * @param string|null $directory the export folder by default
-     * @param bool        $dryRun    count the files that would be deleted, and delete nothing
      */
-    public function purgeOldExportFiles(?string $directory = null, bool $dryRun = false): int
+    public function purgeOldExportFiles(?string $directory = null): int
     {
-        $directory ??= ExportStorage::directory();
-
-        if (!is_dir($directory)) {
-            return 0;
-        }
-
-        $finder = new Finder();
-        $finder->files()->in($directory)->date('before '.self::EXPORT_CACHE_MAX_AGE_DAYS.' days ago');
-
-        $fileSystem = new Filesystem();
         $deletedCount = 0;
+        $fileSystem = new Filesystem();
 
-        foreach ($finder as $oldExportFile) {
-            if (!$dryRun) {
-                // The link itself, never the file it points to.
-                $fileSystem->remove($oldExportFile->getPathname());
-            }
+        foreach ($this->oldExportFiles($directory ?? ExportStorage::directory()) as $oldExportFile) {
+            $fileSystem->remove($oldExportFile->getPathname());
             ++$deletedCount;
         }
 
         return $deletedCount;
+    }
+
+    /**
+     * How many files a purge would delete, for a dry run: nothing is written.
+     *
+     * @param string|null $directory the export folder by default
+     */
+    public function countOldExportFiles(?string $directory = null): int
+    {
+        return iterator_count($this->oldExportFiles($directory ?? ExportStorage::directory()));
+    }
+
+    /**
+     * @return \Traversable<\SplFileInfo>
+     */
+    private function oldExportFiles(string $directory): \Traversable
+    {
+        if (!is_dir($directory)) {
+            return new \EmptyIterator();
+        }
+
+        return (new Finder())->files()->in($directory)->date('before '.self::EXPORT_CACHE_MAX_AGE_DAYS.' days ago')->getIterator();
     }
 }

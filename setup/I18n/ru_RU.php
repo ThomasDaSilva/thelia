@@ -1528,4 +1528,6 @@ return [
     'Promotion' => 'Акция',
     'Newness' => 'Новинка',
     'Configuration background jobs' => 'Настройка фоновых задач',
+    'Shipping notice sent to the customer' => 'Уведомление об отправке отправлено клиенту',
+    'Your order {{ order_ref }} has been shipped' => 'Ваш заказ {{ order_ref }} отправлен',
 ];

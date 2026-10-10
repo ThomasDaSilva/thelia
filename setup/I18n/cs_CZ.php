@@ -32,4 +32,5 @@ return [
     'Promotion' => 'Akce',
     'Newness' => 'Novinka',
     'Configuration background jobs' => 'Konfigurace úloh na pozadí',
+    'Your order {{ order_ref }} has been shipped' => 'Vaše objednávka {{ order_ref }} byla odeslána',
 ];
